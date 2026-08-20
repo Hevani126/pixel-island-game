@@ -12,7 +12,7 @@
   html,body{width:100%;height:100%;overflow:hidden;overscroll-behavior:none;
     background:#2b2519;font-family:'Microsoft YaHei','PingFang SC',sans-serif;
     -webkit-user-select:none;user-select:none;-webkit-tap-highlight-color:transparent;}
-  #game{display:block;width:100%;height:100%;touch-action:none;cursor:default;position:fixed;top:0;left:0;}
+  #game{display:block;width:100%;height:100%;touch-action:none;cursor:default;}
   /* 移动端虚拟控制 */
   #dpad{position:fixed;left:12px;bottom:12px;z-index:20;width:144px;height:144px;
     touch-action:none;pointer-events:none;display:none;}
@@ -24,37 +24,6 @@
   #dpUp{left:49px;top:0} #dpDown{left:49px;bottom:0}
   #dpLeft{left:0;top:49px} #dpRight{left:98px;top:49px}
   #dpA{left:49px;top:49px;background:rgba(200,120,60,0.75)}
-  /* 移动端竖屏时强制横屏显示 */
-  @media screen and (orientation:portrait) and (max-width:1024px){
-    html{
-      transform:rotate(90deg);
-      transform-origin:0 0;
-      position:fixed;
-      top:0;
-      left:0;
-      width:100vh;
-      height:100vw;
-      overflow:hidden;
-    }
-    body{
-      width:100vh;
-      height:100vw;
-      position:fixed;
-      top:0;
-      left:0;
-    }
-    #game{
-      width:100vh;
-      height:100vw;
-      position:fixed;
-      top:0;
-      left:0;
-    }
-    #dpad{
-      /* 虚拟按键也需要调整位置 */
-      transform:rotate(0deg);
-    }
-  }
 </style>
 </head>
 <body>
@@ -71,18 +40,9 @@ const ctx = canvas.getContext('2d');
 let dpr=1, cw=0, ch=0;
 function resize(){
   dpr = window.devicePixelRatio||1;
-  // 用 visualViewport 获取真实可视区域
-  let vw = window.visualViewport ? window.visualViewport.width : window.innerWidth;
-  let vh = window.visualViewport ? window.visualViewport.height : window.innerHeight;
-  // 移动端竖屏时 CSS 旋转了90度，需要交换宽高
-  // 检测方法：如果宽 < 高 且是移动设备，则为竖屏（CSS已旋转但viewport未变）
-  const isMobile = /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent) || ('ontouchstart' in window);
-  if(isMobile && vw < vh){
-    // 竖屏模式：CSS旋转90度后，逻辑宽度=物理高度，逻辑高度=物理宽度
-    const temp = vw;
-    vw = vh;
-    vh = temp;
-  }
+  // 用 visualViewport 获取真实可视区域（解决移动端地址栏遮挡问题）
+  const vw = window.visualViewport ? window.visualViewport.width : window.innerWidth;
+  const vh = window.visualViewport ? window.visualViewport.height : window.innerHeight;
   cw = Math.max(vw, 100); ch = Math.max(vh, 100);
   canvas.width = Math.floor(cw*dpr); canvas.height = Math.floor(ch*dpr);
   canvas.style.width = cw+'px'; canvas.style.height = ch+'px';
