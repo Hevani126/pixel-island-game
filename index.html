@@ -188,13 +188,34 @@ const ITEMS = {
   fertilizer:{name:'高级肥料',color:'#8FB36B',shape:'bag'},
 };
 // 可食用物品 → 食用后恢复的体力值
-// 动物产出：牛奶/鸡蛋；野果野菜：浆果/蘑菇/鲜花/冰花；部分草药：草药；鱼类：鲤鱼/鲈鱼/河虾；料理（小信处购买，含通用料理/鱼汤/麦饼/炖菜）；体力药剂
+// === 农作物（生吃，恢复较少） ===
+// wheat:小麦粥底, carrot:生胡萝卜, tomato:生番茄, potato:生土豆
+// === 动物产出 ===
+// milk:牛奶(营养), egg:鸡蛋(蛋白质)
+// === 野外采集 ===
+// berry:浆果(酸甜), mushroom:蘑菇(鲜美), flower:鲜花(花瓣可食), iceflower:冰花(清凉)
+// === 草药 ===
+// herb:草药(药膳)
+// === 水产 ===
+// fish_carp:鲤鱼, fish_bass:鲈鱼, shrimp:河虾
+// === 加工料理（小信处购买/烹饪获得，恢复最多） ===
+// dish:通用料理, fish_soup:鱼汤, bread:麦饼, stew:炖菜
+// === 特殊 ===
+// potion:体力药剂(最强恢复)
 const EDIBLE = {
+  // 农作物（生吃，恢复少量体力）
+  wheat:5, carrot:8, tomato:6, potato:7,
+  // 动物产出（营养较好）
   milk:18, egg:15,
+  // 野外采集（恢复少量到中等）
   berry:10, mushroom:12, flower:8, iceflower:10,
+  // 草药（药膳，中等恢复）
   herb:14,
+  // 水产（中等恢复）
   fish_carp:16, fish_bass:16, shrimp:12,
+  // 加工料理（恢复最多，需要食材制作或购买）
   dish:30, fish_soup:35, bread:20, stew:40,
+  // 特殊道具（最强恢复）
   potion:50,
 };
 // 耐寒作物（小雪正常生长；大雪仅其减速生长，非耐寒作物大概率枯死）
