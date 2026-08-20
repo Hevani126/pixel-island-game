@@ -8,8 +8,8 @@
   html,body{margin:0;padding:0;height:100%;overflow:hidden;overscroll-behavior:none;
     background:#2b2519;font-family:'Microsoft YaHei','PingFang SC',sans-serif;
     -webkit-user-select:none;user-select:none;-webkit-tap-highlight-color:transparent;}
-  #canvas-wrap{width:100%;height:100%;position:absolute;top:0;left:0;}
-  #game{display:block;position:absolute;top:0;left:0;cursor:default;touch-action:none;width:100%;height:100%;}
+  #canvas-wrap{width:100%;height:100%;position:fixed;top:0;left:0;overflow:hidden;}
+  #game{display:block;position:absolute;top:0;left:0;cursor:default;touch-action:none;}
   /* 移动端强制横屏 */
   #rotate-overlay{display:none;position:fixed;top:0;left:0;width:100vw;height:100vh;
     z-index:9999;background:#2b2519;flex-direction:column;align-items:center;
@@ -23,8 +23,7 @@
     body.lock-landscape #canvas-wrap{
       width:100vh;height:100vw;
       transform:rotate(90deg);transform-origin:top left;
-      position:absolute;top:0;left:0;}
-    body.lock-landscape #canvas-wrap #game{width:100%;height:100%;}
+      position:fixed;top:0;left:0;}
     body.lock-landscape #rotate-overlay{display:none !important;}
   }
   /* 移动端虚拟控制（DOM 覆盖层：固定定位、等比、不拉伸变形） */
@@ -57,15 +56,14 @@ function resize(){
   dpr = window.devicePixelRatio||1;
   const isLockedPortrait = document.body.classList.contains('lock-landscape');
   if(isLockedPortrait){
-    // CSS 旋转模式：canvas-wrap 的宽高已经通过 CSS 交换
-    // canvas 的逻辑尺寸应为屏幕长边×短边（横屏）
     cw = Math.max(window.innerWidth, window.innerHeight);
     ch = Math.min(window.innerWidth, window.innerHeight);
   } else {
     cw = window.innerWidth; ch = window.innerHeight;
   }
+  if(cw<100) cw=100; if(ch<100) ch=100;
   canvas.width = Math.floor(cw*dpr); canvas.height = Math.floor(ch*dpr);
-  canvas.style.width = '100%'; canvas.style.height = '100%';
+  canvas.style.width = cw+'px'; canvas.style.height = ch+'px';
   ctx.setTransform(dpr,0,0,dpr,0,0);
   ctx.textBaseline='alphabetic';
 }
@@ -3757,17 +3755,27 @@ function initLandscapeMode(){
 
 /* ================= 启动 ================= */
 function init(){
-  resize();
-  if(!load()){
-    state=defaultState();
-    map=buildMap();
-    initWeather();
+  try{
+    resize();
+    if(!load()){
+      state=defaultState();
+      map=buildMap();
+      initWeather();
+    }
+    buildMenuButtons();
+    buildBottomButtons();
+    initMobileUI();
+    initLandscapeMode();
+    requestAnimationFrame(loop);
+  }catch(e){
+    console.error('游戏启动失败:',e);
+    ctx.fillStyle='#2b2519'; ctx.fillRect(0,0,cw,ch);
+    ctx.fillStyle='#f0d9a0'; ctx.font='bold 18px sans-serif'; ctx.textAlign='center';
+    ctx.fillText('游戏加载出错，请刷新页面重试',cw/2,ch/2-10);
+    ctx.font='14px sans-serif'; ctx.fillStyle='#b9a079';
+    ctx.fillText(''+e,cw/2,ch/2+20);
+    ctx.textAlign='left';
   }
-  buildMenuButtons();
-  buildBottomButtons();
-  initMobileUI();
-  initLandscapeMode();
-  requestAnimationFrame(loop);
 }
 window.addEventListener('resize', ()=>{ buildMenuButtons(); buildBottomButtons(); });
 init();
