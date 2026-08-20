@@ -228,6 +228,19 @@ const SEED_TO_CROP = {wheat_seed:'wheat', carrot_seed:'carrot', tomato_seed:'tom
 function clamp(v,a,b){return v<a?a:(v>b?b:v);}
 // 体力消耗（大雪灾害天气消耗大幅上升）
 function spend(n){ state.stamina -= n * (state.weather==='大雪'?1.8:1); }
+// 经验值系统
+function addExp(n){
+  state.exp += n;
+  while(state.exp >= state.expMax){
+    state.exp -= state.expMax;
+    state.level++;
+    state.expMax = Math.floor(state.expMax * 1.5);  // 每级经验需求递增50%
+    state.maxStamina += 5;                            // 升级增加体力上限
+    state.stamina = state.maxStamina;                 // 升级回满体力
+    toast('🎉 升级！Lv.'+state.level+' 体力上限+5');
+  }
+  save();
+}
 function rnd(a,b){return a+Math.random()*(b-a);}
 function rndInt(a,b){return Math.floor(rnd(a,b+1));}
 function choice(arr){return arr[Math.floor(Math.random()*arr.length)];}
@@ -264,6 +277,7 @@ function defaultState(){
     px: 2*TILE, py: 38*TILE,   // 玩家农场：初始站在自家房屋上方草地（玩家屋占 tx=1..3, ty=39..41）
     dir: 'down', moving:false,
     stamina: 100, maxStamina:100,
+    level: 1, exp: 0, expMax: 100, reputation: 0,
     day: 1, time: 8,            // 时间(小时)
     weather: '晴',
     weatherDays: 1, pendingWeather: '晴', pendingDays: 1,
@@ -1146,6 +1160,7 @@ function save(){
   try{
     const d={
       px:state.px, py:state.py, dir:state.dir, stamina:state.stamina, maxStamina:state.maxStamina,
+      level:state.level, exp:state.exp, expMax:state.expMax, reputation:state.reputation,
       day:state.day, time:state.time, weather:state.weather, weatherDays:state.weatherDays, pendingWeather:state.pendingWeather, pendingDays:state.pendingDays, lastTyphoonDay:state.lastTyphoonDay, lastSnowDay:state.lastSnowDay, coin:state.coin, houseLevel:state.houseLevel,
       unlockedPlotCount:state.unlockedPlotCount, inv:state.inv, goodwill:state.goodwill,
       quests:state.quests, codex:state.codex, invOrder:state.invOrder, carpenterDiscount:state.carpenterDiscount, mainStoryUnlocked:state.mainStoryUnlocked, helpers:state.helpers,
@@ -1199,6 +1214,10 @@ function load(){
     if(state.lastSnowDay===undefined) state.lastSnowDay=-99;
     if(!state.randomQuests) state.randomQuests={};
     if(!state.randomGifts) state.randomGifts={};
+    if(state.level===undefined) state.level=1;
+    if(state.exp===undefined) state.exp=0;
+    if(state.expMax===undefined) state.expMax=100;
+    if(state.reputation===undefined) state.reputation=0;
     map = buildMap();
     // 重建农田
     map.plots = d.plots.map(p=>({tx:p.tx,ty:p.ty,stage:p.stage,crop:p.crop,watered:p.watered}));
@@ -1320,11 +1339,6 @@ let mouseX=0, mouseY=0;
 canvas.addEventListener('mousemove', e=>{
   const r=canvas.getBoundingClientRect();
   mouseX=e.clientX-r.left; mouseY=e.clientY-r.top;
-  hoverInv=null;
-  // 背包 hover 检测
-  for(const s of invSlotsRender){
-    if(mouseX>=s.x&&mouseX<=s.x+s.w&&mouseY>=s.y&&mouseY<=s.y+s.h){ hoverInv=s.id; break; }
-  }
 });
 canvas.addEventListener('mousedown', e=>{
   const r=canvas.getBoundingClientRect();
@@ -1341,15 +1355,6 @@ function onPointerDown(mx,my){
   // 底部按钮
   for(const b of bottomButtons){
     if(mx>=b.x&&mx<=b.x+b.w&&my>=b.y&&my<=b.y+b.h){ b.action(); return; }
-  }
-  // 展开背包时点物品：可食用物品右下角"食"按钮→食用恢复体力；其余点击→置顶排序（调整收起时顶部5格）
-  if(state.invExpanded){
-    for(const s of invSlotsRender){
-      if(s.eat && mx>=s.eat.x&&mx<=s.eat.x+s.eat.w&&my>=s.eat.y&&my<=s.eat.y+s.eat.h){ doEat(s.id); return; }
-    }
-    for(const s of invSlotsRender){
-      if(mx>=s.x&&mx<=s.x+s.w&&my>=s.y&&my<=s.y+s.h){ reorderInv(s.id); return; }
-    }
   }
   // 点击 NPC（灾害/小雪居家时不响应）
   for(const npc of map.npcs){
@@ -1491,13 +1496,13 @@ function doPlant(){
     // 浇水（种植按钮集成浇水，需求未设独立浇水按钮）
     if(p.watered){ toast('已经浇过水啦，睡觉可催熟'); return; }
     p.watered=true; if(p.stage==='seeded') p.stage='growing';
-    spend(3); toast('浇水完成'); save(); return;
+    spend(3); addExp(3); toast('浇水完成'); save(); return;
   }
   if(p.stage==='mature'){
     const cropName = ITEMS[p.crop].name;
     addItem(p.crop,1);
     p.stage='tilled'; p.crop=null; p.watered=false;
-    spend(5); toast('收获 '+cropName+' 成功');
+    spend(5); addExp(12); toast('收获 '+cropName+' 成功');
     save(); return;
   }
 }
@@ -1516,7 +1521,7 @@ function openSeedChooser(plot, seeds){
 function plantWith(p, seed){
   p.stage='seeded'; p.crop=SEED_TO_CROP[seed]; p.watered=false;
   state.inv[seed]--; if(state.inv[seed]<=0) delete state.inv[seed];
-  spend(5); state.codex[seed]=true;
+  spend(5); state.codex[seed]=true; addExp(8);
   toast('播种了 '+ITEMS[seed].name);
   save();
 }
@@ -1525,7 +1530,7 @@ function doCollect(){
   if(!r){ toast('附近没有可采集物'); return; }
   if(r.depleted){ toast('今天已经采集过了'); return; }
   const item = r.type;
-  addItem(item,1); r.depleted=true; spend(4);
+  addItem(item,1); r.depleted=true; spend(4); addExp(6);
   const d=chanceDrop('trinket',0.25)||chanceDrop('page',0.10);
   toast(d? ('采集到 '+ITEMS[item].name+'，获得'+ITEMS[d].name) : ('采集到 '+ITEMS[item].name)); save();
 }
@@ -1533,7 +1538,7 @@ function doFish(){
   if(!nearWater()){ toast('要到水边才能钓鱼'); return; }
   if(state.stamina<6){ toast('体力不足'); return; }
   const fish=choice(['fish_carp','fish_bass','shrimp']);
-  addItem(fish,1); spend(6);
+  addItem(fish,1); spend(6); addExp(10);
   const d=chanceDrop('relic',0.20);
   toast(d? ('钓到了 '+ITEMS[fish].name+'，获得'+ITEMS[d].name) : ('钓到了 '+ITEMS[fish].name)); save();
 }
@@ -1543,7 +1548,7 @@ function doAnimal(){
   if(a.depleted){ toast('今天已经照顾过了'); return; }
   addItem(a.product,1);
   if(a.hide && Math.random()<0.5) addItem(a.hide,1);
-  a.depleted=true; spend(4); toast('获得 '+ITEMS[a.product].name); save();
+  a.depleted=true; spend(4); addExp(8); toast('获得 '+ITEMS[a.product].name); save();
 }
 function doEat(id){
   if(!id || !(id in EDIBLE)){ return; }
@@ -1622,7 +1627,7 @@ function doChop(){
   if(!t){ toast('附近没有树木'); return; }
   if(t.depleted){ toast('这棵树已经砍过了'); return; }
   if(state.stamina<7){ toast('体力不足'); return; }
-  addItem('wood',1); t.depleted=true; spend(7);
+  addItem('wood',1); t.depleted=true; spend(7); addExp(8);
   const d=chanceDrop('resin',0.30)||chanceDrop('vine',0.20)||chanceDrop('chisel',0.06);
   toast(d? ('砍到木头，获得'+ITEMS[d].name) : '砍到木头'); save();
 }
@@ -1631,7 +1636,7 @@ function doMine(){
   if(!r){ toast('附近没有石头'); return; }
   if(r.depleted){ toast('这块石头已经凿过了'); return; }
   if(state.stamina<8){ toast('体力不足'); return; }
-  addItem('stone',1); r.depleted=true; spend(8);
+  addItem('stone',1); r.depleted=true; spend(8); addExp(8);
   const d=chanceDrop('pottery',0.25)||chanceDrop('page',0.15);
   toast(d? ('凿到石头，获得'+ITEMS[d].name) : '凿到石头'); save();
 }
@@ -1706,6 +1711,7 @@ function renderChildNPC(id, npc){
 function openNPC(id){
   const npc=map.npcs.find(n=>n.id===id);
   if(!npc) return;
+  addExp(2);  // 交谈获得少量经验
   // 孩童 NPC：独立的陪伴采集弹窗（无任务链/无往事秘辛）
   if(npc.child){ renderChildNPC(id, npc); return; }
   // 交谈推进“送达/打听”类任务（与对应NPC对话即可标记进度）；若因此完成则已接管弹窗
@@ -1831,6 +1837,7 @@ function submitQuest(npcId, qid){
   }
   if(r.items){ for(const k in r.items) addItem(k, r.items[k]); }
   state.quests[qid]={accepted:true,completed:true};
+  addExp(30);
   save();
   toast('任务完成！奖励已发放');
   openNPC(npcId);
@@ -1897,6 +1904,7 @@ function submitChainQuest(id, i){
   if(r.favor) addFavor(id, r.favor);
   if(r.plots) grantPlots(r.plots);
   if(r.discount) state.carpenterDiscount=true;
+  addExp(50);
   save();
   // 终段完成 → 一次性至交专属馈赠（仅文档5位NPC）
   const isLast = (i===NPC_CHAINS[id].length-1);
@@ -1939,7 +1947,7 @@ function submitRandomQuest(id){
   takeItems(t.req);
   if(t.reward.coins) state.coin+=t.reward.coins;
   if(t.reward.items){ for(const k in t.reward.items) addItem(k, t.reward.items[k]); }
-  rq.done[t.id]=true; rq.active=null; save();
+  rq.done[t.id]=true; rq.active=null; addExp(20); save();
   toast('委托完成！奖励已发放');
 }
 // NPC 交谈界面渲染随机委托区块
@@ -2356,7 +2364,7 @@ function drawPopup(){
       for(let i=0;i<it.lines.length;i++){ ctx.fillText(it.lines[i], ix, iy+it.size+i*(it.size+6)); }
     } else if(it.type==='bar'){
       rr(ctx, ix, iy, it.w, it.h, 6); ctx.fillStyle=COL.barBg; ctx.fill();
-      rr(ctx, ix, iy, it.w*it.ratio, it.h, 6); ctx.fillStyle=COL.accent2; ctx.fill();
+      rr(ctx, ix, iy, it.w*it.ratio, it.h, 6); ctx.fillStyle=it.color||COL.accent2; ctx.fill();
     } else if(it.type==='divider'){
       ctx.strokeStyle=it.color; ctx.lineWidth=1;
       ctx.beginPath(); ctx.moveTo(ix, iy+it.h/2); ctx.lineTo(ix+it.w, iy+it.h/2); ctx.stroke();
@@ -2520,6 +2528,8 @@ function openHelp(){
     '【委托】每位 NPC 都有随机委托（好感达标出现），接取后在 TA 的界面提交；委托完成后不再重复出现。',
     '【商店】游村长扩建农田、木伯建筑升级、阿溪渔具商店、小信交易商店+邮件、许先生杂货商店、翠姐酒馆（料理）、玲婆婆草药变卖、知书图鉴委托、阿远物资交换。',
     '【任务】找 NPC 接取任务，满足条件的任务可在 NPC 处提交领取奖励。',
+    '【等级】劳作/交谈/完成任务可获得经验值，升级后体力上限+5并回满体力。',
+    '【背包】点击顶部菜单【背包】查看冒险者信息、背包物品，可食用物品直接点击食用恢复体力。',
     '【存档】自动保存在本地浏览器(localStorage)。',
     '【提示】所有界面均为 Canvas 绘制，弹窗内可用鼠标滚轮滚动。',
   ];
@@ -2653,11 +2663,11 @@ function openRoster(){
 }
 
 /* ================= UI 按钮 ================= */
-let menuButtons=[], bottomButtons=[], invSlotsRender=[];
+let menuButtons=[], bottomButtons=[];
 function buildMenuButtons(){
   menuButtons=[];
-  const labels=['地图','任务','图鉴','名册','帮助'];
-  const acts=[openMapPopup, openTasks, openCodex, openRoster, openHelp];
+  const labels=['背包','地图','任务','图鉴','名册','帮助'];
+  const acts=[openBackpack, openMapPopup, openTasks, openCodex, openRoster, openHelp];
   const bw=64, bh=34, gap=6;
   const total=labels.length*(bw+gap)-gap;
   let x=cw-total-14, y=52;   // 紧贴缩小后的顶部状态栏（h=36，底边44）+8px，靠右对齐；样式/文字/交互完全不变，仅改变绘制位置
@@ -2667,8 +2677,8 @@ function buildMenuButtons(){
 }
 function buildBottomButtons(){
   bottomButtons=[];
-  const labels=['种植','采集','钓鱼','畜牧','睡觉','凿石','伐木','背包'];
-  const acts=[doPlant,doCollect,doFish,doAnimal,doSleep,doMine,doChop,toggleInventory];
+  const labels=['种植','采集','钓鱼','畜牧','睡觉','凿石','伐木'];
+  const acts=[doPlant,doCollect,doFish,doAnimal,doSleep,doMine,doChop];
   const n=labels.length;
   const small = cw < 760;
   if(!small){
@@ -2694,9 +2704,72 @@ function buildBottomButtons(){
     }
   }
 }
-function toggleInventory(){
-  state.invExpanded = !state.invExpanded;
-  toast(state.invExpanded ? '背包已展开' : '背包已收起');
+function openBackpack(){
+  // 计算总声望（所有NPC好感之和）
+  let totalFavor=0;
+  for(const id in state.goodwill){ totalFavor += (state.goodwill[id]||0); }
+  state.reputation = totalFavor;
+
+  const p=openBlankPopup('🎒 背包', {});
+  const pad=18, cw0=p.pw-pad*2;
+  const halfW = Math.floor((cw0-36)/2);
+
+  // ——— 左侧：玩家属性 ———
+  addText(p,'【冒险者信息】', 0, halfW, COL.accent, 15); addGap(p,4);
+  addText(p,'等级：Lv.'+state.level, 0, halfW, COL.text, 14); addGap(p,2);
+  // 经验条
+  const expRatio = state.exp / state.expMax;
+  addText(p,'经验：'+state.exp+' / '+state.expMax, 0, halfW, COL.sub, 13);
+  p.items.push({type:'bar', x:0, y:p._cy, w:halfW, ratio:clamp(expRatio,0,1), h:12, color:'#6DBF5B'});
+  p._cy+=16;
+  addGap(p,6);
+  addText(p,'体力：'+Math.floor(state.stamina)+' / '+state.maxStamina, 0, halfW, COL.text, 14);
+  p.items.push({type:'bar', x:0, y:p._cy, w:halfW, ratio:clamp(state.stamina/state.maxStamina,0,1), h:12, color:'#E8913C'});
+  p._cy+=16;
+  addGap(p,6);
+  addText(p,'金币：'+state.coin, 0, halfW, '#E8C24A', 14); addGap(p,4);
+  addText(p,'房屋：Lv.'+state.houseLevel, 0, halfW, COL.text, 14); addGap(p,4);
+  addText(p,'声望（总好感）：'+totalFavor, 0, halfW, COL.accent2, 14); addGap(p,4);
+  const dayCount = state.day;
+  addText(p,'第 '+dayCount+' 天', 0, halfW, COL.sub, 13); addGap(p,4);
+
+  addGap(p,12);
+  addDivider(p, halfW); addGap(p,4);
+  addText(p,'【食用指南】', 0, halfW, COL.accent, 13); addGap(p,2);
+  addText(p,'料理>药剂>水产>动物产出>采集>农作物', 0, halfW, COL.sub, 12); addGap(p,2);
+  addText(p,'展开背包点击物品右下角【食】按钮', 0, halfW, COL.sub, 12);
+
+  // ——— 右侧：背包物品 ———
+  addDivider(p, cw0); addGap(p,4);
+  const idsAll = invIds();
+  const invSize = 40; // 背包容量上限
+  const used = idsAll.length;
+  const empty = invSize - used;
+  addText(p,'【背包物品】  '+used+'/'+invSize+'格'+(empty>0?'（剩余'+empty+'空位）':'（已满）'), 0, cw0, COL.accent, 14); addGap(p,6);
+
+  if(idsAll.length===0){
+    addText(p,'背包空空如也~', 0, cw0, COL.sub, 14);
+  } else {
+    for(const id of idsAll){
+      const it = ITEMS[id]; if(!it) continue;
+      const qty = state.inv[id]||0;
+      const edible = (id in EDIBLE);
+      const tag = edible ? '  🍴+'+EDIBLE[id]+'体力' : '';
+      const nameColor = edible ? '#E8913C' : COL.text;
+      addText(p, it.name+' ×'+qty+tag, 0, cw0-90, nameColor, 14);
+      if(edible){
+        addButton(p,'食用', cw0-82, 82, 28, ()=>{
+          doEat(id);
+          closePopup(); openBackpack(); // 刷新背包窗口
+        }, (state.inv[id]||0)>0 && state.stamina<state.maxStamina, '#E8913C');
+      } else {
+        addGap(p, 4);
+      }
+    }
+  }
+
+  addGap(p,8);
+  addButton(p,'关闭', 0, cw0, 30, ()=>{ closePopup(); }, true, COL.sub);
 }
 
 /* ================= 渲染 ================= */
@@ -3200,51 +3273,7 @@ function drawMenuButtons(){
   }
 }
 
-/* ---------------- 背包（常驻，顶部状态栏边框下方，靠左对齐，展开时向下生长） ---------------- */
-function drawInventory(){
-  const idsAll=invIds();
-  if(idsAll.length===0) return;
-  const sw=38, gap=6, cols=5, pad=10;
-  const expanded=state.invExpanded;
-  const ids=expanded ? idsAll : idsAll.slice(0,5);
-  const extra=!expanded && idsAll.length>5 ? idsAll.length-5 : 0;
-  const rows=Math.ceil(ids.length/cols);
-  const w=cols*sw+(cols-1)*gap+pad*2;
-  const h=rows*sw+(rows-1)*gap+pad*2;
-  const x=10, y=52;   // 紧贴缩小后的顶部状态栏（h=36，底边44）+8px，靠左对齐；展开时向下生长，不压盖地图
-  rr(ctx,x,y,w,h,12); ctx.fillStyle='rgba(255,250,238,0.92)'; ctx.fill();
-  ctx.lineWidth=2; ctx.strokeStyle=COL.border; ctx.stroke();
-  invSlotsRender=[];
-  for(let i=0;i<ids.length;i++){
-    const col=i%cols, row=Math.floor(i/cols);
-    const sx=x+pad+col*(sw+gap), sy=y+pad+row*(sw+gap);
-    rr(ctx,sx,sy,sw,sw,8); ctx.fillStyle='#fff'; ctx.fill();
-    ctx.lineWidth=1.5; ctx.strokeStyle=COL.border; ctx.stroke();
-    drawItemIcon(ids[i], sx+3, sy+3, sw-6);
-    const edible = (ids[i] in EDIBLE);
-    invSlotsRender.push({x:sx,y:sy,w:sw,h:sw,id:ids[i], edible, eat:null});
-    if(expanded && edible){
-      // 右下角"食"小按钮：点击食用恢复体力
-      const eb={x:sx+sw-16, y:sy+sw-16, w:16, h:16};
-      ctx.fillStyle='#E8913C'; rr(ctx,eb.x,eb.y,eb.w,eb.h,4); ctx.fill();
-      setFont(10,true); ctx.fillStyle='#fff'; ctx.textAlign='center';
-      ctx.fillText('食', eb.x+eb.w/2, eb.y+eb.h/2+3); ctx.textAlign='left';
-      invSlotsRender[invSlotsRender.length-1].eat=eb;
-    }
-    if(extra>0 && i===ids.length-1){
-      ctx.fillStyle='rgba(120,90,60,0.85)';
-      rr(ctx,sx+2,sy+2,16,16,5); ctx.fill();
-      setFont(10,true); ctx.fillStyle='#fff'; ctx.textAlign='center';
-      ctx.fillText('+'+extra, sx+10, sy+13);
-      ctx.textAlign='left';
-    }
-  }
-  if(expanded && idsAll.length>1){
-    setFont(11,false); ctx.fillStyle=COL.sub; ctx.textAlign='center';
-    ctx.fillText('点击物品可置顶排序 · 点击【背包】收起', x+w/2, y+h-6);
-    ctx.textAlign='left';
-  }
-}
+/* ---------------- 背包（已改为弹窗模式，见 openBackpack） ---------------- */
 
 /* ---------------- 悬浮提示 ---------------- */
 function drawTooltip(){
@@ -3447,7 +3476,6 @@ function loop(ts){
   drawTimeTint();
   drawWeatherFX();
   drawTopBar();
-  drawInventory();
   drawBottomBar();
   drawMenuButtons();
   if(currentPopup) drawPopup();
