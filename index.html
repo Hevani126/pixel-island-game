@@ -141,51 +141,50 @@ const COL = {
 
 /* ---------------- 物品字典 ---------------- */
 const ITEMS = {
-  wheat_seed:{name:'小麦种子',color:'#D9B36A',shape:'seed'},
-  carrot_seed:{name:'胡萝卜种子',color:'#E0893C',shape:'seed'},
-  tomato_seed:{name:'番茄种子',color:'#E2533B',shape:'seed'},
-  wheat:{name:'小麦',color:'#E3C067',shape:'grain'},
-  carrot:{name:'胡萝卜',color:'#EF8B3C',shape:'root'},
-  tomato:{name:'番茄',color:'#E5483B',shape:'round'},
-  wood:{name:'木头',color:'#9C6B3F',shape:'log'},
-  stone:{name:'石头',color:'#9AA0A6',shape:'rock'},
-  fiber:{name:'纤维',color:'#A7C46B',shape:'leaf'},
-  berry:{name:'浆果',color:'#C0407A',shape:'berry'},
-  mushroom:{name:'蘑菇',color:'#D96B5B',shape:'mush'},
-  flower:{name:'鲜花',color:'#E58FB0',shape:'flower'},
-  fish_carp:{name:'鲤鱼',color:'#C98B5A',shape:'fish'},
-  fish_bass:{name:'鲈鱼',color:'#7FA0B0',shape:'fish'},
-  shrimp:{name:'河虾',color:'#E0956B',shape:'shrimp'},
-  milk:{name:'牛奶',color:'#F2EFE6',shape:'bottle'},
-  egg:{name:'鸡蛋',color:'#F3E9C8',shape:'egg'},
-  wool:{name:'羊毛',color:'#F0EAD8',shape:'fluff'},
-  coin:{name:'金币',color:'#E8C24A',shape:'coin'},
-  bait:{name:'鱼饵',color:'#C9A24B',shape:'bag'},
-  rod:{name:'鱼竿',color:'#B5824A',shape:'rod'},
-  mystery_seed:{name:'神秘种子',color:'#9B6BC4',shape:'seed'},
-  herb:{name:'草药',color:'#7BA05B',shape:'leaf'},
-  potion:{name:'体力药剂',color:'#C86BB0',shape:'bottle'},
-  pelt:{name:'兽皮',color:'#C9A06B',shape:'fur'},
-  rare_seed:{name:'稀有种子',color:'#B06BD0',shape:'seed'},
-  iceflower:{name:'冰花',color:'#9FD8E8',shape:'flower'},
-  pinecone:{name:'松果',color:'#9C6B3F',shape:'nut'},
-  trap:{name:'捕兽夹',color:'#8A8F94',shape:'trap'},
-  dish:{name:'料理',color:'#E0A45E',shape:'dish'},
-  fish_soup:{name:'鱼汤',color:'#C9A24B',shape:'dish'},
-  bread:{name:'麦饼',color:'#E0B36B',shape:'dish'},
-  stew:{name:'炖菜',color:'#B98A6B',shape:'dish'},
-  // 剧情任务所需物品
-  potato_seed:{name:'土豆种子',color:'#C9A24B',shape:'seed'},
-  potato:{name:'土豆',color:'#D8B96A',shape:'round'},
-  resin:{name:'树脂',color:'#C98A3C',shape:'drop'},
-  vine:{name:'藤蔓',color:'#7BA05B',shape:'leaf'},
-  pottery:{name:'古陶碎片',color:'#B98A6B',shape:'shard'},
-  chisel:{name:'老凿子',color:'#9AA0A6',shape:'tool'},
-  relic:{name:'河底遗物',color:'#7FA0B0',shape:'round'},
-  trinket:{name:'旅人遗物',color:'#C9A06B',shape:'trinket'},
-  page:{name:'古籍残页',color:'#C9B26B',shape:'page'},
-  mat_adv:{name:'高级建材',color:'#B98B5B',shape:'log'},
-  fertilizer:{name:'高级肥料',color:'#8FB36B',shape:'bag'},
+  wheat_seed:{name:'小麦种子',color:'#D9B36A',shape:'seed',desc:'基础作物种子，春季播种，成熟后收获小麦。'},
+  carrot_seed:{name:'胡萝卜种子',color:'#E0893C',shape:'seed',desc:'橙色根茎作物种子，生长周期较短。'},
+  tomato_seed:{name:'番茄种子',color:'#E2533B',shape:'seed',desc:'红色果实作物种子，喜温暖天气。'},
+  wheat:{name:'小麦',color:'#E3C067',shape:'grain',desc:'基础粮食作物，可食用恢复少量体力，也可加工为麦饼。',edible:true},
+  carrot:{name:'胡萝卜',color:'#EF8B3C',shape:'root',desc:'橙色根茎蔬菜，生吃恢复体力。',edible:true},
+  tomato:{name:'番茄',color:'#E5483B',shape:'round',desc:'红润多汁的果实，生吃清爽解渴。',edible:true},
+  wood:{name:'木头',color:'#9C6B3F',shape:'log',desc:'基础建材，伐木获得，用于建筑升级和制作。'},
+  stone:{name:'石头',color:'#9AA0A6',shape:'rock',desc:'基础矿材，凿石获得，用于建筑升级。'},
+  fiber:{name:'纤维',color:'#A7C46B',shape:'leaf',desc:'植物纤维，采集获得，可用于制作。'},
+  berry:{name:'浆果',color:'#C0407A',shape:'berry',desc:'野生浆果，酸甜可口，食用恢复体力。',edible:true},
+  mushroom:{name:'蘑菇',color:'#D96B5B',shape:'mush',desc:'野生蘑菇，味道鲜美，食用恢复体力。',edible:true},
+  flower:{name:'鲜花',color:'#E58FB0',shape:'flower',desc:'美丽野花，可赠送NPC或食用花瓣。',edible:true},
+  fish_carp:{name:'鲤鱼',color:'#C98B5A',shape:'fish',desc:'淡水鲤鱼，钓鱼获得，食用恢复体力。',edible:true},
+  fish_bass:{name:'鲈鱼',color:'#7FA0B0',shape:'fish',desc:'河中鲈鱼，肉质鲜美，食用恢复体力。',edible:true},
+  shrimp:{name:'河虾',color:'#E0956B',shape:'shrimp',desc:'小河虾，钓鱼获得，味道鲜美。',edible:true},
+  milk:{name:'牛奶',color:'#F2EFE6',shape:'bottle',desc:'动物产出的牛奶，营养丰富。',edible:true},
+  egg:{name:'鸡蛋',color:'#F3E9C8',shape:'egg',desc:'新鲜鸡蛋，富含蛋白质。',edible:true},
+  wool:{name:'羊毛',color:'#F0EAD8',shape:'fluff',desc:'柔软的羊毛，可加工为纺织品。'},
+  coin:{name:'金币',color:'#E8C24A',shape:'coin',desc:'通用货币，用于商店交易。'},
+  bait:{name:'鱼饵',color:'#C9A24B',shape:'bag',desc:'钓鱼专用饵料，提高钓鱼效率。'},
+  rod:{name:'鱼竿',color:'#B5824A',shape:'rod',desc:'钓鱼工具，阿溪渔具商店获得。'},
+  mystery_seed:{name:'神秘种子',color:'#9B6BC4',shape:'seed',desc:'来历不明的种子，据说能长出稀有作物。'},
+  herb:{name:'草药',color:'#7BA05B',shape:'leaf',desc:'药用草药，食用可恢复体力，也可赠送玲婆婆。',edible:true},
+  potion:{name:'体力药剂',color:'#C86BB0',shape:'bottle',desc:'浓缩体力药剂，饮用后大幅恢复体力。',edible:true},
+  pelt:{name:'兽皮',color:'#C9A06B',shape:'fur',desc:'动物毛皮，可赠送阿远或出售。'},
+  rare_seed:{name:'稀有种子',color:'#B06BD0',shape:'seed',desc:'珍贵的稀有种子，可赠送给阿远。'},
+  iceflower:{name:'冰花',color:'#9FD8E8',shape:'flower',desc:'冬季特有的冰晶花朵，清凉解渴。',edible:true},
+  pinecone:{name:'松果',color:'#9C6B3F',shape:'nut',desc:'松树果实，冬季采集获得。'},
+  trap:{name:'捕兽夹',color:'#8A8F94',shape:'trap',desc:'狩猎工具，可赠送给阿远。'},
+  dish:{name:'料理',color:'#E0A45E',shape:'dish',desc:'翠姐酒馆的招牌料理，美味又充饥。',edible:true},
+  fish_soup:{name:'鱼汤',color:'#C9A24B',shape:'dish',desc:'鲜美鱼汤，用新鲜鱼熬制，恢复大量体力。',edible:true},
+  bread:{name:'麦饼',color:'#E0B36B',shape:'dish',desc:'小麦烤制的饼，香脆可口。',edible:true},
+  stew:{name:'炖菜',color:'#B98A6B',shape:'dish',desc:'丰盛炖菜，多种食材熬制，恢复最多体力。',edible:true},
+  potato_seed:{name:'土豆种子',color:'#C9A24B',shape:'seed',desc:'块茎作物种子，耐寒性好。'},
+  potato:{name:'土豆',color:'#D8B96A',shape:'round',desc:'朴实的土豆，生吃可恢复少量体力。',edible:true},
+  resin:{name:'树脂',color:'#C98A3C',shape:'drop',desc:'树木分泌的树脂，伐木小概率获得。'},
+  vine:{name:'藤蔓',color:'#7BA05B',shape:'leaf',desc:'柔韧的藤蔓，伐木获得，可用于制作。'},
+  pottery:{name:'古陶碎片',color:'#B98A6B',shape:'shard',desc:'远古陶器碎片，凿石小概率获得。'},
+  chisel:{name:'老凿子',color:'#9AA0A6',shape:'tool',desc:'木伯祖传的老旧凿子，伐木时偶然发现。'},
+  relic:{name:'河底遗物',color:'#7FA0B0',shape:'round',desc:'沉在河底的古老物件，钓鱼时打捞获得。'},
+  trinket:{name:'旅人遗物',color:'#C9A06B',shape:'trinket',desc:'过往旅人遗落的小物件，采集时发现。'},
+  page:{name:'古籍残页',color:'#C9B26B',shape:'page',desc:'散落的古籍残页，记载着古老知识。'},
+  mat_adv:{name:'高级建材',color:'#B98B5B',shape:'log',desc:'精加工的高级建材，用于高级建筑。'},
+  fertilizer:{name:'高级肥料',color:'#8FB36B',shape:'bag',desc:'高效肥料，加速作物生长。'},
 };
 // 可食用物品 → 食用后恢复的体力值
 // === 农作物（生吃，恢复较少） ===
@@ -307,11 +306,12 @@ function resetExpDecay(){ _recentExp={}; }
 function addExp(n){
   if(state.level>=MAX_LEVEL) return;
   state.exp += n;
-  const next = getExpToNext();
-  while(state.exp >= next && state.level<MAX_LEVEL){
+  while(state.level<MAX_LEVEL){
+    const next = LEVEL_TABLE[state.level+1].expTotal;
+    if(state.exp < next) break;
     state.level++;
     state.maxStamina = getMaxStamina();
-    state.stamina = Math.min(state.stamina+10, state.maxStamina); // 升级回复10体力
+    state.stamina = Math.min(state.stamina+10, state.maxStamina);
     toast('🎉 升级！Lv.'+state.level+' 体力上限→'+state.maxStamina+' 背包→'+getInvSlots()+'格');
   }
   save();
@@ -2415,10 +2415,16 @@ function handlePopupClick(mx,my){
   const top=py+p.titleH+p.tabsH+pad;
   const localY = my - top + p.scrollY;
   for(const it of p.items){
-    if(it.type!=='button') continue;
-    if(mx>=px+pad+it.x && mx<=px+pad+it.x+it.w && localY>=it.y && localY<=it.y+it.h){
-      if(it.enabled!==false) it.action();
-      return;
+    if(it.type==='button'){
+      if(mx>=px+pad+it.x && mx<=px+pad+it.x+it.w && localY>=it.y && localY<=it.y+it.h){
+        if(it.enabled!==false) it.action();
+        return;
+      }
+    } else if(it.type==='gridCell'){
+      if(mx>=px+pad+it.x && mx<=px+pad+it.x+it.w && localY>=it.y && localY<=it.y+it.h){
+        openItemDetail(it.id);
+        return;
+      }
     }
   }
 }
@@ -2493,6 +2499,40 @@ function drawPopup(){
       else { setFont(20,true); ctx.fillStyle=COL.faint; ctx.textAlign='center'; ctx.fillText('?', ix+it.w/2, iy+it.w/2+7); ctx.textAlign='left'; }
       setFont(11,false); ctx.fillStyle=COL.sub; ctx.textAlign='center';
       ctx.fillText(it.discovered?ITEMS[it.id].name:'未解锁', ix+it.w/2, iy+it.w+15); ctx.textAlign='left';
+    } else if(it.type==='gridCell'){
+      const cellHover = mouseX>=ix&&mouseX<=ix+it.w&&mouseY>=iy&&mouseY<=iy+it.h;
+      // 格子背景
+      rr(ctx, ix, iy, it.w, it.h, 8);
+      ctx.fillStyle = cellHover ? '#FFF0DC' : '#fff';
+      ctx.fill();
+      ctx.lineWidth = cellHover ? 2.5 : 1.5;
+      ctx.strokeStyle = cellHover ? COL.accent : COL.border;
+      ctx.stroke();
+      // 物品图标
+      drawItemIcon(it.id, ix+4, iy+4, it.w-8);
+      // 右下角数量标签
+      const qty = it.qty;
+      if(qty > 0){
+        const qtyStr = qty > 99 ? '99+' : ''+qty;
+        setFont(11, true);
+        const qtyW = ctx.measureText(qtyStr).width + 8;
+        const qx = ix + it.w - qtyW - 2;
+        const qy = iy + it.h - 16;
+        rr(ctx, qx, qy, qtyW, 16, 4);
+        ctx.fillStyle = 'rgba(80,55,25,0.85)';
+        ctx.fill();
+        ctx.fillStyle = '#fff';
+        ctx.textAlign = 'center';
+        ctx.fillText(qtyStr, qx + qtyW/2, qy + 12);
+        ctx.textAlign = 'left';
+      }
+      // 可食用标记（左上角小圆点）
+      if(it.id in EDIBLE){
+        ctx.fillStyle = '#E8913C';
+        ctx.beginPath();
+        ctx.arc(ix + 8, iy + 8, 4, 0, 6.28);
+        ctx.fill();
+      }
     } else if(it.type==='map'){
       const mw=it.w, mh=it.h;
       const sxk=mw/MAP_W, syk=mh/MAP_H;
@@ -2815,6 +2855,38 @@ function buildBottomButtons(){
     }
   }
 }
+function openItemDetail(id){
+  const it=ITEMS[id]; if(!it) return;
+  const qty=state.inv[id]||0;
+  const edible=(id in EDIBLE);
+  const p=openBlankPopup(it.name, {});
+  const pad=18, cw0=p.pw-pad*2;
+  // 物品图标（大号居中）
+  const iconSize=64;
+  const iconX=(cw0-iconSize)/2;
+  p.items.push({type:'codex', x:iconX, y:p._cy, w:iconSize, h:iconSize+4, id:id, discovered:true});
+  p._cy+=iconSize+10;
+  // 数量
+  addText(p,'拥有数量：'+qty, 0, cw0, COL.text, 15); addGap(p,6);
+  // 物品描述
+  addText(p, it.desc, 0, cw0, COL.sub, 13); addGap(p,6);
+  // 可食用提示 + 食用按钮
+  if(edible){
+    addText(p,'🍴 食用可恢复 '+EDIBLE[id]+' 点体力', 0, cw0, '#E8913C', 14); addGap(p,8);
+    addButton(p,'食用（恢复'+EDIBLE[id]+'体力）', 0, cw0, 36, ()=>{
+      doEat(id);
+      closePopup();
+      if((state.inv[id]||0)>0) openItemDetail(id); else openBackpack();
+    }, qty>0 && state.stamina<state.maxStamina, '#E8913C');
+    if(state.stamina>=state.maxStamina){
+      addText(p,'（体力已满，无法食用）', 0, cw0, COL.faint, 12);
+    }
+  }
+  addGap(p,8);
+  addButton(p,'关闭', 0, cw0, 30, ()=>{ closePopup(); }, true, COL.sub);
+  finalizePopup(p);
+}
+
 function openBackpack(){
   const p=openBlankPopup('🎒 背包', {});
   const pad=18, cw0=p.pw-pad*2;
@@ -2845,13 +2917,22 @@ function openBackpack(){
   // 等级解锁提示
   addDivider(p, halfW); addGap(p,4);
   addText(p,'【等级解锁】', 0, halfW, COL.accent, 13); addGap(p,2);
-  const unlocks=['','Lv2 采集双倍','Lv3 农田扩建','Lv4 体力降低','Lv5 房屋二阶','Lv6 送礼+20%','Lv7 房屋三阶'];
-  for(let i=2;i<=MAX_LEVEL;i++){
-    const done = state.level>=i;
+  const unlocks=[
+    'Lv1 初始冒险者（体力100，背包16格）',
+    'Lv2 采集双倍产出（20%概率）',
+    'Lv3 农田扩建+NPC中级商品',
+    'Lv4 体力消耗降低15%',
+    'Lv5 房屋二阶升级+高级商品',
+    'Lv6 送礼好感+20%+动物产出提升',
+    'Lv7 房屋三阶+遗迹主线剧情'
+  ];
+  for(let i=0;i<unlocks.length;i++){
+    const lv=i+1;
+    const done = state.level>=lv;
     addText(p, (done?'✓ ':'🔒 ')+unlocks[i], 0, halfW, done?COL.accent2:COL.faint, 12);
   }
 
-  // ——— 右侧：背包物品 ———
+  // ——— 右侧：背包物品（格子显示）———
   addDivider(p, cw0); addGap(p,4);
   const idsAll = invIds();
   const invSize = getInvSlots();
@@ -2862,25 +2943,23 @@ function openBackpack(){
   if(idsAll.length===0){
     addText(p,'背包空空如也~', 0, cw0, COL.sub, 14);
   } else {
+    // 格子显示：每个物品一个格子，右下角显示数量
+    const cols = 6;
+    const gap = 6;
+    const cellSize = Math.floor((cw0 - (cols-1)*gap) / cols);
+    let i=0;
     for(const id of idsAll){
-      const it = ITEMS[id]; if(!it) continue;
-      const qty = state.inv[id]||0;
-      const edible = (id in EDIBLE);
-      const tag = edible ? '  🍴+'+EDIBLE[id]+'体力' : '';
-      const nameColor = edible ? '#E8913C' : COL.text;
-      addText(p, it.name+' ×'+qty+tag, 0, cw0-90, nameColor, 14);
-      if(edible){
-        addButton(p,'食用', cw0-82, 82, 28, ()=>{
-          doEat(id);
-          closePopup(); openBackpack();
-        }, (state.inv[id]||0)>0 && state.stamina<state.maxStamina, '#E8913C');
-      } else {
-        addGap(p, 4);
-      }
+      const col=i%cols, row=Math.floor(i/cols);
+      const x=col*(cellSize+gap), y=p._cy+row*(cellSize+gap);
+      // 格子背景+边框
+      p.items.push({type:'gridCell', x, y, w:cellSize, h:cellSize, id:id, qty:state.inv[id]||0});
+      i++;
     }
+    const rows=Math.ceil(idsAll.length/cols);
+    p._cy += rows*(cellSize+gap);
   }
 
-  addGap(p,8);
+  addGap(p,10);
   addButton(p,'关闭', 0, cw0, 30, ()=>{ closePopup(); }, true, COL.sub);
 }
 
