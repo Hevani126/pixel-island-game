@@ -3658,24 +3658,31 @@ let saveTimer=5;
 let last=0;
 function loop(ts){
   const dt=Math.min(0.05,(ts-last)/1000)||0; last=ts;
-  update(dt);
-  updateCamera();
-  ctx.clearRect(0,0,cw,ch);
-  drawWorld();
-  drawTimeTint();
-  drawWeatherFX();
-  drawTopBar();
-  drawBottomBar();
-  drawMenuButtons();
-  if(currentPopup) drawPopup();
-  drawTooltip();
-  // toast
-  if(toastT>0){
-    setFont(15,true);
-    const tw=ctx.measureText(toastMsg).width+28;
-    const x=(cw-tw)/2, y=ch-110;   // 动作栏回到屏幕底部，toast 置于其上方，避免压住动作按钮
-    rr(ctx,x,y,tw,34,10); ctx.fillStyle='rgba(60,45,25,0.9)'; ctx.fill();
-    ctx.fillStyle='#fff'; ctx.textAlign='center'; ctx.fillText(toastMsg,x+tw/2,y+22); ctx.textAlign='left';
+  try{
+    update(dt);
+    updateCamera();
+    ctx.clearRect(0,0,cw,ch);
+    drawWorld();
+    drawTimeTint();
+    drawWeatherFX();
+    drawTopBar();
+    drawBottomBar();
+    drawMenuButtons();
+    if(currentPopup) drawPopup();
+    drawTooltip();
+    if(toastT>0){
+      setFont(15,true);
+      const tw=ctx.measureText(toastMsg).width+28;
+      const x=(cw-tw)/2, y=ch-110;
+      rr(ctx,x,y,tw,34,10); ctx.fillStyle='rgba(60,45,25,0.9)'; ctx.fill();
+      ctx.fillStyle='#fff'; ctx.textAlign='center'; ctx.fillText(toastMsg,x+tw/2,y+22); ctx.textAlign='left';
+    }
+  }catch(e){
+    console.error('[自游小村] 渲染错误:',e);
+    ctx.fillStyle='#2b2519'; ctx.fillRect(0,0,cw,ch);
+    ctx.fillStyle='#ff6b6b'; ctx.font='bold 14px sans-serif'; ctx.textAlign='center';
+    ctx.fillText('渲染出错: '+(e.message||e),cw/2,ch/2);
+    ctx.textAlign='left';
   }
   requestAnimationFrame(loop);
 }
@@ -3757,24 +3764,28 @@ function initLandscapeMode(){
 function init(){
   try{
     resize();
+    console.log('[自游小村] canvas:',canvas.width,'x',canvas.height,' cw:',cw,' ch:',ch);
     if(!load()){
+      console.log('[自游小村] 新游戏');
       state=defaultState();
       map=buildMap();
       initWeather();
     }
+    console.log('[自游小村] state:',!!state,' map:',!!map);
     buildMenuButtons();
     buildBottomButtons();
     initMobileUI();
     initLandscapeMode();
     requestAnimationFrame(loop);
   }catch(e){
-    console.error('游戏启动失败:',e);
-    ctx.fillStyle='#2b2519'; ctx.fillRect(0,0,cw,ch);
-    ctx.fillStyle='#f0d9a0'; ctx.font='bold 18px sans-serif'; ctx.textAlign='center';
-    ctx.fillText('游戏加载出错，请刷新页面重试',cw/2,ch/2-10);
-    ctx.font='14px sans-serif'; ctx.fillStyle='#b9a079';
-    ctx.fillText(''+e,cw/2,ch/2+20);
-    ctx.textAlign='left';
+    console.error('[自游小村] 启动失败:',e);
+    try{
+      ctx.fillStyle='#2b2519'; ctx.fillRect(0,0,cw||400,ch||300);
+      ctx.fillStyle='#f0d9a0'; ctx.font='bold 16px sans-serif'; ctx.textAlign='center';
+      ctx.fillText('游戏出错: '+(e.message||e),(cw||400)/2,(ch||300)/2);
+      ctx.fillText('请访问 ?reset=1 清除存档重试',(cw||400)/2,(ch||300)/2+25);
+      ctx.textAlign='left';
+    }catch(e2){}
   }
 }
 window.addEventListener('resize', ()=>{ buildMenuButtons(); buildBottomButtons(); });
