@@ -222,25 +222,102 @@ const EDIBLE = {
 const COLD_RESIST = {wheat:true, carrot:true, potato:true};
 // 冬日专属采集物（小雪刷新）
 const WINTER_RES = ['iceflower','pinecone'];
+
+/* ============ 角色等级系统 ============ */
+const LEVEL_TABLE = [
+  null, // 索引0不用
+  {expTotal:0,   stamina:100, invSlots:16}, // Lv1
+  {expTotal:220, stamina:110, invSlots:20}, // Lv2：采集小概率双倍产出
+  {expTotal:500, stamina:120, invSlots:24}, // Lv3：解锁禾奶奶农田扩建，开放NPC中级商品
+  {expTotal:900, stamina:130, invSlots:28}, // Lv4：劳作体力消耗小幅降低，采集刷新数量提升
+  {expTotal:1450,stamina:140, invSlots:32}, // Lv5：解锁房屋二阶升级，开放全部NPC高级商品
+  {expTotal:2100,stamina:150, invSlots:36}, // Lv6：送礼好感获取小幅提升，动物产出概率提升
+  {expTotal:3000,stamina:160, invSlots:40}, // Lv7：解锁房屋三阶升级，解锁遗迹完整主线剧情
+];
+const MAX_LEVEL = 7;
+function levelInfo(lv){ return LEVEL_TABLE[clamp(lv,1,MAX_LEVEL)]; }
+function getMaxStamina(){ return levelInfo(state.level).stamina; }
+function getInvSlots(){ return levelInfo(state.level).invSlots; }
+function getExpToNext(){ return state.level>=MAX_LEVEL ? Infinity : LEVEL_TABLE[state.level+1].expTotal; }
+
+/* ============ 村庄声望系统 ============ */
+const REPUTATION_MAX = 320;
+function addReputation(n){
+  state.reputation = clamp((state.reputation||0)+n, 0, REPUTATION_MAX);
+}
+
+/* ============ 房屋升级系统 ============ */
+const HOUSE_UPGRADES = [
+  null, // 索引0=初始小屋
+  { // 一阶民居
+    name:'一阶民居', reqLevel:3, reqRep:80,
+    cost:{wood:80, stone:40, coin:250},
+    storageBonus:10, desc:'储物箱+10，解锁屋内基础家具摆放'
+  },
+  { // 二阶宅院
+    name:'二阶宅院', reqLevel:5, reqRep:180,
+    cost:{wood:150, stone:80, coin:600},
+    storageBonus:16, desc:'储物箱+16，更多家具位，屋内存放饲料'
+  },
+  { // 三阶乡居大宅
+    name:'三阶乡居大宅', reqLevel:7, reqRep:320,
+    cost:{wood:220, stone:100, coin:1200},
+    storageBonus:22, desc:'储物箱+22，睡觉恢复体力加成'
+  },
+];
+function getHouseStorage(){
+  let base=12; // 初始小屋
+  for(let i=1;i<state.houseLevel;i++){
+    const u=HOUSE_UPGRADES[i]; if(u) base+=u.storageBonus;
+  }
+  return base;
+}
+function canUpgradeHouse(){
+  if(state.houseLevel>=HOUSE_UPGRADES.length) return {ok:false, reason:'已达最高级'};
+  const u=HOUSE_UPGRADES[state.houseLevel]; if(!u) return {ok:false, reason:'未知'};
+  if(state.level<u.reqLevel) return {ok:false, reason:'需角色等级 Lv.'+u.reqLevel};
+  if((state.reputation||0)<u.reqRep) return {ok:false, reason:'需村庄声望 '+u.reqRep};
+  for(const k in u.cost){
+    if(k==='coin'){ if(state.coin<u.cost.coin) return {ok:false, reason:'金币不足（需'+u.cost.coin+'）'}; }
+    else if((state.inv[k]||0)<u.cost[k]) return {ok:false, reason:ITEMS[k].name+'不足（需'+u.cost[k]+'）'};
+  }
+  return {ok:true};
+}
 const SEED_TO_CROP = {wheat_seed:'wheat', carrot_seed:'carrot', tomato_seed:'tomato', potato_seed:'potato'};
 
 /* ---------------- 工具 ---------------- */
 function clamp(v,a,b){return v<a?a:(v>b?b:v);}
 // 体力消耗（大雪灾害天气消耗大幅上升）
-function spend(n){ state.stamina -= n * (state.weather==='大雪'?1.8:1); }
-// 经验值系统
+function spend(n){
+  // Lv4+ 劳作体力消耗小幅降低
+  const discount = state.level>=4 ? 0.85 : 1;
+  state.stamina -= n * discount * (state.weather==='大雪'?1.8:1);
+}
+// 经验衰减（防止刷级：同类采集物重复获取经验递减）
+let _recentExp = {};  // {type: count}
+function expWithDecay(base, type){
+  const cnt = (_recentExp[type]||0);
+  const decay = Math.max(0.1, 1 - cnt*0.15); // 每次同类-15%，最低10%
+  _recentExp[type] = cnt+1;
+  return Math.max(1, Math.floor(base*decay));
+}
+// 每天重置衰减计数
+function resetExpDecay(){ _recentExp={}; }
+// 经验值系统（等级上限Lv7，经验值为累计总量）
 function addExp(n){
+  if(state.level>=MAX_LEVEL) return;
   state.exp += n;
-  while(state.exp >= state.expMax){
-    state.exp -= state.expMax;
+  const next = getExpToNext();
+  while(state.exp >= next && state.level<MAX_LEVEL){
     state.level++;
-    state.expMax = Math.floor(state.expMax * 1.5);  // 每级经验需求递增50%
-    state.maxStamina += 5;                            // 升级增加体力上限
-    state.stamina = state.maxStamina;                 // 升级回满体力
-    toast('🎉 升级！Lv.'+state.level+' 体力上限+5');
+    state.maxStamina = getMaxStamina();
+    state.stamina = Math.min(state.stamina+10, state.maxStamina); // 升级回复10体力
+    toast('🎉 升级！Lv.'+state.level+' 体力上限→'+state.maxStamina+' 背包→'+getInvSlots()+'格');
   }
   save();
 }
+// 声望系统（仅特定活动获取）
+function addRep(n){ addReputation(n); }
 function rnd(a,b){return a+Math.random()*(b-a);}
 function rndInt(a,b){return Math.floor(rnd(a,b+1));}
 function choice(arr){return arr[Math.floor(Math.random()*arr.length)];}
@@ -277,7 +354,7 @@ function defaultState(){
     px: 2*TILE, py: 38*TILE,   // 玩家农场：初始站在自家房屋上方草地（玩家屋占 tx=1..3, ty=39..41）
     dir: 'down', moving:false,
     stamina: 100, maxStamina:100,
-    level: 1, exp: 0, expMax: 100, reputation: 0,
+    level: 1, exp: 0, reputation: 0,
     day: 1, time: 8,            // 时间(小时)
     weather: '晴',
     weatherDays: 1, pendingWeather: '晴', pendingDays: 1,
@@ -1160,7 +1237,7 @@ function save(){
   try{
     const d={
       px:state.px, py:state.py, dir:state.dir, stamina:state.stamina, maxStamina:state.maxStamina,
-      level:state.level, exp:state.exp, expMax:state.expMax, reputation:state.reputation,
+      level:state.level, exp:state.exp, reputation:state.reputation,
       day:state.day, time:state.time, weather:state.weather, weatherDays:state.weatherDays, pendingWeather:state.pendingWeather, pendingDays:state.pendingDays, lastTyphoonDay:state.lastTyphoonDay, lastSnowDay:state.lastSnowDay, coin:state.coin, houseLevel:state.houseLevel,
       unlockedPlotCount:state.unlockedPlotCount, inv:state.inv, goodwill:state.goodwill,
       quests:state.quests, codex:state.codex, invOrder:state.invOrder, carpenterDiscount:state.carpenterDiscount, mainStoryUnlocked:state.mainStoryUnlocked, helpers:state.helpers,
@@ -1216,8 +1293,10 @@ function load(){
     if(!state.randomGifts) state.randomGifts={};
     if(state.level===undefined) state.level=1;
     if(state.exp===undefined) state.exp=0;
-    if(state.expMax===undefined) state.expMax=100;
     if(state.reputation===undefined) state.reputation=0;
+    // 同步体力上限到等级
+    state.maxStamina = getMaxStamina();
+    if(state.stamina>state.maxStamina) state.stamina=state.maxStamina;
     map = buildMap();
     // 重建农田
     map.plots = d.plots.map(p=>({tx:p.tx,ty:p.ty,stage:p.stage,crop:p.crop,watered:p.watered}));
@@ -1502,7 +1581,7 @@ function doPlant(){
     const cropName = ITEMS[p.crop].name;
     addItem(p.crop,1);
     p.stage='tilled'; p.crop=null; p.watered=false;
-    spend(5); addExp(12); toast('收获 '+cropName+' 成功');
+    spend(5); addExp(expWithDecay(12,'harvest')); toast('收获 '+cropName+' 成功');
     save(); return;
   }
 }
@@ -1530,15 +1609,18 @@ function doCollect(){
   if(!r){ toast('附近没有可采集物'); return; }
   if(r.depleted){ toast('今天已经采集过了'); return; }
   const item = r.type;
-  addItem(item,1); r.depleted=true; spend(4); addExp(6);
+  let qty=1;
+  if(state.level>=2 && Math.random()<0.2) qty=2; // Lv2：20%双倍产出
+  addItem(item,qty); r.depleted=true; spend(4); addExp(expWithDecay(6,'collect'));
   const d=chanceDrop('trinket',0.25)||chanceDrop('page',0.10);
-  toast(d? ('采集到 '+ITEMS[item].name+'，获得'+ITEMS[d].name) : ('采集到 '+ITEMS[item].name)); save();
+  const qtyStr = qty>1 ? '×'+qty+'！' : '';
+  toast(d? ('采集到 '+ITEMS[item].name+qtyStr+'，获得'+ITEMS[d].name) : ('采集到 '+ITEMS[item].name+qtyStr)); save();
 }
 function doFish(){
   if(!nearWater()){ toast('要到水边才能钓鱼'); return; }
   if(state.stamina<6){ toast('体力不足'); return; }
   const fish=choice(['fish_carp','fish_bass','shrimp']);
-  addItem(fish,1); spend(6); addExp(10);
+  addItem(fish,1); spend(6); addExp(expWithDecay(10,'fish'));
   const d=chanceDrop('relic',0.20);
   toast(d? ('钓到了 '+ITEMS[fish].name+'，获得'+ITEMS[d].name) : ('钓到了 '+ITEMS[fish].name)); save();
 }
@@ -1547,8 +1629,9 @@ function doAnimal(){
   if(!a){ toast('附近没有动物'); return; }
   if(a.depleted){ toast('今天已经照顾过了'); return; }
   addItem(a.product,1);
-  if(a.hide && Math.random()<0.5) addItem(a.hide,1);
-  a.depleted=true; spend(4); addExp(8); toast('获得 '+ITEMS[a.product].name); save();
+  const hideChance = state.level>=6 ? 0.7 : 0.5; // Lv6：动物产出概率提升
+  if(a.hide && Math.random()<hideChance) addItem(a.hide,1);
+  a.depleted=true; spend(4); addExp(expWithDecay(8,'animal')); toast('获得 '+ITEMS[a.product].name); save();
 }
 function doEat(id){
   if(!id || !(id in EDIBLE)){ return; }
@@ -1570,6 +1653,7 @@ function finishSleep(){
   state.day+=1;
   state.time=8;
   state.stamina=state.maxStamina;
+  resetExpDecay();  // 每天重置经验衰减
   // 天气推进：仅睡觉切换；普通天气持续1-3天，灾害固定1天
   state.weatherDays = (state.weatherDays||1) - 1;
   if(state.weatherDays>0){
@@ -1627,7 +1711,7 @@ function doChop(){
   if(!t){ toast('附近没有树木'); return; }
   if(t.depleted){ toast('这棵树已经砍过了'); return; }
   if(state.stamina<7){ toast('体力不足'); return; }
-  addItem('wood',1); t.depleted=true; spend(7); addExp(8);
+  addItem('wood',1); t.depleted=true; spend(7); addExp(expWithDecay(8,'chop'));
   const d=chanceDrop('resin',0.30)||chanceDrop('vine',0.20)||chanceDrop('chisel',0.06);
   toast(d? ('砍到木头，获得'+ITEMS[d].name) : '砍到木头'); save();
 }
@@ -1636,7 +1720,7 @@ function doMine(){
   if(!r){ toast('附近没有石头'); return; }
   if(r.depleted){ toast('这块石头已经凿过了'); return; }
   if(state.stamina<8){ toast('体力不足'); return; }
-  addItem('stone',1); r.depleted=true; spend(8); addExp(8);
+  addItem('stone',1); r.depleted=true; spend(8); addExp(expWithDecay(8,'mine'));
   const d=chanceDrop('pottery',0.25)||chanceDrop('page',0.15);
   toast(d? ('凿到石头，获得'+ITEMS[d].name) : '凿到石头'); save();
 }
@@ -1784,25 +1868,48 @@ function openNPC(id){
   if(id==='granny'){ // 游村长【扩建农田】+ 高好感赠种子肥料
     const price=50;
     const can = state.unlockedPlotCount + 10 < map.plotSlots.length+10;
+    const lvOk = state.level>=3; // Lv3 才能扩建农田
     addButton(p,'扩建农田（'+price+'金币 → 解锁3块）', 0, cw0, 34, ()=>{
+      if(state.level<3){ toast('需角色等级 Lv.3 才能扩建农田'); return; }
       if(state.coin<price){ toast('金币不足'); return; }
       if(state.unlockedPlotCount+3 > map.plotSlots.length){ toast('已达农田上限'); return; }
       state.coin-=price;
       for(let i=0;i<3;i++){ const s=map.plotSlots[state.unlockedPlotCount++]; map.plots.push({tx:s.tx,ty:s.ty,stage:'wild',crop:null,watered:false}); map.occupied.add(key(s.tx,s.ty)); }
       save(); toast('解锁了3块新农田'); openNPC(id);
-    }, can);
+    }, can && lvOk, (can && lvOk)?COL.accent:'#B0A898');
+    if(!lvOk) addText(p,'🔒 需角色等级 Lv.3 解锁扩建', 0, cw0, COL.faint, 12);
     if(g>=600 && !state.randomGifts.granny){
       addButton(p,'🎁 领取好感赠礼（种子肥料）', 0, cw0, 34, ()=>{ claimGoodwillGift('granny'); openNPC(id); });
     }
   }
-  if(id==='carpenter'){ // 木伯【建筑升级】
-    const price = state.carpenterDiscount? 75 : 100;
-    addButton(p,'建筑升级（'+price+'金币+5石头'+(state.carpenterDiscount?'·已折扣':'')+'）', 0, cw0, 34, ()=>{
-      if(state.coin<price){ toast('金币不足'); return; }
-      if((state.inv.stone||0)<5){ toast('石头不足(需5)'); return; }
-      state.coin-=price; state.inv.stone-=5; if(state.inv.stone<=0) delete state.inv.stone;
-      state.houseLevel++; save(); toast('房屋升级到 Lv.'+state.houseLevel); openNPC(id);
-    });
+  if(id==='carpenter'){ // 木伯【房屋升级系统】
+    const nextLv = state.houseLevel;
+    const upg = HOUSE_UPGRADES[nextLv];
+    if(upg){
+      const check = canUpgradeHouse();
+      const costStr = Object.entries(upg.cost).map(([k,v])=>{
+        if(k==='coin') return v+'金币';
+        return ITEMS[k]? v+ITEMS[k].name : v+k;
+      }).join('、');
+      const label = '🏠 升级：'+upg.name+'（'+costStr+'）';
+      addButton(p, label, 0, cw0, 34, ()=>{
+        if(!canUpgradeHouse().ok){ toast(canUpgradeHouse().reason); return; }
+        // 扣除材料
+        for(const k in upg.cost){
+          if(k==='coin') state.coin-=upg.cost.coin;
+          else { state.inv[k]-=upg.cost[k]; if(state.inv[k]<=0) delete state.inv[k]; }
+        }
+        state.houseLevel++; save();
+        toast('🎉 房屋升级为 '+upg.name+'！储物箱+'+upg.storageBonus);
+        openNPC(id);
+      }, check.ok, check.ok?COL.accent:'#B0A898');
+      if(!check.ok){
+        addText(p,'⚠ '+check.reason, 0, cw0, '#D88', 12);
+      }
+      addText(p, upg.desc, 0, cw0, COL.sub, 12);
+    } else {
+      addText(p,'🏠 房屋已达最高级（'+HOUSE_UPGRADES[HOUSE_UPGRADES.length-1].name+'）', 0, cw0, COL.accent2, 13);
+    }
   }
   if(id==='xinxin'){ // 小信【交易商店】+ 查看邮件
     addButton(p,'📮 查看邮件', 0, cw0, 34, ()=>{ openMail(); });
@@ -1837,7 +1944,7 @@ function submitQuest(npcId, qid){
   }
   if(r.items){ for(const k in r.items) addItem(k, r.items[k]); }
   state.quests[qid]={accepted:true,completed:true};
-  addExp(30);
+  addExp(30); addRep(15);
   save();
   toast('任务完成！奖励已发放');
   openNPC(npcId);
@@ -1904,7 +2011,7 @@ function submitChainQuest(id, i){
   if(r.favor) addFavor(id, r.favor);
   if(r.plots) grantPlots(r.plots);
   if(r.discount) state.carpenterDiscount=true;
-  addExp(50);
+  addExp(50); addRep(25);
   save();
   // 终段完成 → 一次性至交专属馈赠（仅文档5位NPC）
   const isLast = (i===NPC_CHAINS[id].length-1);
@@ -1947,7 +2054,7 @@ function submitRandomQuest(id){
   takeItems(t.req);
   if(t.reward.coins) state.coin+=t.reward.coins;
   if(t.reward.items){ for(const k in t.reward.items) addItem(k, t.reward.items[k]); }
-  rq.done[t.id]=true; rq.active=null; addExp(20); save();
+  rq.done[t.id]=true; rq.active=null; addExp(20); addRep(10); save();
   toast('委托完成！奖励已发放');
 }
 // NPC 交谈界面渲染随机委托区块
@@ -2110,6 +2217,7 @@ function tryGiveGift(id, k){
   if(pref && pref.like && pref.like.indexOf(k)>=0) inc=12;
   else if(pref && pref.dislike && pref.dislike.indexOf(k)>=0) inc=-6;
   else inc = (k==='flower'||k==='berry')?8: (k.indexOf('seed')>=0?3:5);
+  if(state.level>=6 && inc>0) inc = Math.ceil(inc*1.2); // Lv6：送礼好感+20%
   const before = state.goodwill[id]||0;
   // 上限保护：好感已达当前上限时，赠送不再消耗物品（厌恶-好感除外，仍可降低）
   if(inc>0 && before >= favorCap(id)){
@@ -2118,6 +2226,7 @@ function tryGiveGift(id, k){
   }
   state.inv[k] = (state.inv[k]||0) - 1; if(state.inv[k]<=0) delete state.inv[k];
   addFavor(id, inc);
+  addExp(2); // 送礼微量经验
   save();
   toast(inc>=0? ('好感 +'+inc) : ('好感 '+inc));
   return true;
@@ -2528,8 +2637,10 @@ function openHelp(){
     '【委托】每位 NPC 都有随机委托（好感达标出现），接取后在 TA 的界面提交；委托完成后不再重复出现。',
     '【商店】游村长扩建农田、木伯建筑升级、阿溪渔具商店、小信交易商店+邮件、许先生杂货商店、翠姐酒馆（料理）、玲婆婆草药变卖、知书图鉴委托、阿远物资交换。',
     '【任务】找 NPC 接取任务，满足条件的任务可在 NPC 处提交领取奖励。',
-    '【等级】劳作/交谈/完成任务可获得经验值，升级后体力上限+5并回满体力。',
-    '【背包】点击顶部菜单【背包】查看冒险者信息、背包物品，可食用物品直接点击食用恢复体力。',
+    '【等级】劳作/交谈/完成任务可获得经验值，升级后体力上限提升、背包格子+4。经验获取有衰减防刷级。',
+    '【声望】完成主线任务、NPC委托、好感剧情、村庄建设获取声望（上限320），作为功能解锁门槛。',
+    '【背包】点击顶部菜单【背包】查看等级、经验、声望、体力、背包物品，可食用物品直接点击食用恢复体力。',
+    '【房屋】找木伯升级房屋，提升储物箱容量。需满足等级+声望+材料条件。',
     '【存档】自动保存在本地浏览器(localStorage)。',
     '【提示】所有界面均为 Canvas 绘制，弹窗内可用鼠标滚轮滚动。',
   ];
@@ -2653,7 +2764,7 @@ function openRoster(){
     else addGap(p, 10);
   });
   // 全局主线入口：集齐全部10位NPC至交+支线后，由玩家在此拼合“古农田遗迹”完整真相
-  if(state.mainStoryUnlocked || allSecretsComplete()){
+  if(state.mainStoryUnlocked || (allSecretsComplete() && state.level>=7)){
     addGap(p,6);
     addText(p,'【主线 · 古农田遗迹】你已集齐十位村民各自交出的碎片，真相就在拼图之间。', 0, cw0, COL.accent, 13);
     addGap(p,4);
@@ -2705,44 +2816,45 @@ function buildBottomButtons(){
   }
 }
 function openBackpack(){
-  // 计算总声望（所有NPC好感之和）
-  let totalFavor=0;
-  for(const id in state.goodwill){ totalFavor += (state.goodwill[id]||0); }
-  state.reputation = totalFavor;
-
   const p=openBlankPopup('🎒 背包', {});
   const pad=18, cw0=p.pw-pad*2;
   const halfW = Math.floor((cw0-36)/2);
 
   // ——— 左侧：玩家属性 ———
   addText(p,'【冒险者信息】', 0, halfW, COL.accent, 15); addGap(p,4);
-  addText(p,'等级：Lv.'+state.level, 0, halfW, COL.text, 14); addGap(p,2);
-  // 经验条
-  const expRatio = state.exp / state.expMax;
-  addText(p,'经验：'+state.exp+' / '+state.expMax, 0, halfW, COL.sub, 13);
+  // 等级 + 经验条
+  const nextExp = getExpToNext();
+  const expText = state.level>=MAX_LEVEL ? '已满级' : state.exp+'/'+nextExp;
+  const expRatio = state.level>=MAX_LEVEL ? 1 : state.exp/nextExp;
+  addText(p,'等级：Lv.'+state.level+' / '+MAX_LEVEL, 0, halfW, COL.text, 14); addGap(p,2);
+  addText(p,'经验：'+expText, 0, halfW, COL.sub, 13);
   p.items.push({type:'bar', x:0, y:p._cy, w:halfW, ratio:clamp(expRatio,0,1), h:12, color:'#6DBF5B'});
-  p._cy+=16;
-  addGap(p,6);
+  p._cy+=16; addGap(p,6);
+  // 体力条
   addText(p,'体力：'+Math.floor(state.stamina)+' / '+state.maxStamina, 0, halfW, COL.text, 14);
   p.items.push({type:'bar', x:0, y:p._cy, w:halfW, ratio:clamp(state.stamina/state.maxStamina,0,1), h:12, color:'#E8913C'});
-  p._cy+=16;
-  addGap(p,6);
-  addText(p,'金币：'+state.coin, 0, halfW, '#E8C24A', 14); addGap(p,4);
-  addText(p,'房屋：Lv.'+state.houseLevel, 0, halfW, COL.text, 14); addGap(p,4);
-  addText(p,'声望（总好感）：'+totalFavor, 0, halfW, COL.accent2, 14); addGap(p,4);
-  const dayCount = state.day;
-  addText(p,'第 '+dayCount+' 天', 0, halfW, COL.sub, 13); addGap(p,4);
-
-  addGap(p,12);
+  p._cy+=16; addGap(p,6);
+  // 村庄声望
+  addText(p,'村庄声望：'+(state.reputation||0)+' / '+REPUTATION_MAX, 0, halfW, COL.accent2, 14);
+  p.items.push({type:'bar', x:0, y:p._cy, w:halfW, ratio:clamp((state.reputation||0)/REPUTATION_MAX,0,1), h:12, color:'#B06BD0'});
+  p._cy+=16; addGap(p,6);
+  // 其他信息
+  addText(p,'金币：'+state.coin, 0, halfW, '#E8C24A', 14); addGap(p,2);
+  addText(p,'房屋：Lv.'+state.houseLevel+'（储物箱'+getHouseStorage()+'格）', 0, halfW, COL.text, 13); addGap(p,2);
+  addText(p,'第 '+state.day+' 天', 0, halfW, COL.sub, 13); addGap(p,6);
+  // 等级解锁提示
   addDivider(p, halfW); addGap(p,4);
-  addText(p,'【食用指南】', 0, halfW, COL.accent, 13); addGap(p,2);
-  addText(p,'料理>药剂>水产>动物产出>采集>农作物', 0, halfW, COL.sub, 12); addGap(p,2);
-  addText(p,'展开背包点击物品右下角【食】按钮', 0, halfW, COL.sub, 12);
+  addText(p,'【等级解锁】', 0, halfW, COL.accent, 13); addGap(p,2);
+  const unlocks=['','Lv2 采集双倍','Lv3 农田扩建','Lv4 体力降低','Lv5 房屋二阶','Lv6 送礼+20%','Lv7 房屋三阶'];
+  for(let i=2;i<=MAX_LEVEL;i++){
+    const done = state.level>=i;
+    addText(p, (done?'✓ ':'🔒 ')+unlocks[i], 0, halfW, done?COL.accent2:COL.faint, 12);
+  }
 
   // ——— 右侧：背包物品 ———
   addDivider(p, cw0); addGap(p,4);
   const idsAll = invIds();
-  const invSize = 40; // 背包容量上限
+  const invSize = getInvSlots();
   const used = idsAll.length;
   const empty = invSize - used;
   addText(p,'【背包物品】  '+used+'/'+invSize+'格'+(empty>0?'（剩余'+empty+'空位）':'（已满）'), 0, cw0, COL.accent, 14); addGap(p,6);
@@ -2760,7 +2872,7 @@ function openBackpack(){
       if(edible){
         addButton(p,'食用', cw0-82, 82, 28, ()=>{
           doEat(id);
-          closePopup(); openBackpack(); // 刷新背包窗口
+          closePopup(); openBackpack();
         }, (state.inv[id]||0)>0 && state.stamina<state.maxStamina, '#E8913C');
       } else {
         addGap(p, 4);
@@ -3455,7 +3567,7 @@ function update(dt){
   // 场景任务自动完成（如“跨村送信”：走到村外边缘即触发）
   checkSceneQuests();
   // 全局结局：集齐全部10位NPC至交+支线后，首次解锁“古农田遗迹真相”拼合入口
-  if(!state.mainStoryUnlocked && allSecretsComplete()){
+  if(!state.mainStoryUnlocked && allSecretsComplete() && state.level>=7){
     state.mainStoryUnlocked=true; save();
     toast('你集齐了十位村民的碎片……真相，似乎拼成了。');
   }
