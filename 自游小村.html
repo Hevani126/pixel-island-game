@@ -1441,6 +1441,28 @@ canvas.addEventListener('mousedown', e=>{
   const r=canvas.getBoundingClientRect();
   onPointerDown(e.clientX-r.left, e.clientY-r.top);
 });
+// 电脑端双击检测
+canvas.addEventListener('dblclick', e=>{
+  if(!currentPopup) return;
+  const r=canvas.getBoundingClientRect();
+  const mx=e.clientX-r.left, my=e.clientY-r.top;
+  const hitItem = findItemAtPos(mx, my);
+  if(!hitItem) return;
+  if(hitItem.type==='grid' && (hitItem.id in EDIBLE)){
+    // 双击食用
+    doEat(hitItem.id);
+    hoverGridItem=null;
+    if((state.inv[hitItem.id]||0)<=0){
+      closePopup(); openBackpack();
+    }
+  } else if(hitItem.type==='seed'){
+    // 双击播种
+    if(hitItem.plot && (state.inv[hitItem.id]||0)>0){
+      plantWith(hitItem.plot, hitItem.id);
+      closePopup();
+    }
+  }
+});
 // 统一指针按下处理（鼠标与触摸共用，原有全部交互逻辑保持不变）
 function onPointerDown(mx,my){
   mouseX=mx; mouseY=my;
@@ -1462,6 +1484,7 @@ function onPointerDown(mx,my){
 }
 // 移动端触摸映射：触摸屏幕坐标 → 画布坐标（与鼠标完全一致），弹窗内可拖拽滚动
 let _tAct=false, _tMoved=false, _tLY=0, _tsx=0, _tsy=0;
+let _longPressTimer=null, _longPressTriggered=false;
 function _tPt(t){
   const r=canvas.getBoundingClientRect();
   const dx=t.clientX-r.left, dy=t.clientY-r.top;
@@ -1472,6 +1495,24 @@ function _tPt(t){
 canvas.addEventListener('touchstart', e=>{
   if(e.touches.length!==1) return;
   const p=_tPt(e.touches[0]); _tsx=p.x; _tsy=p.y; _tLY=p.y; _tMoved=false; _tAct=true;
+  _longPressTriggered=false;
+  // 长按检测（500ms）
+  if(currentPopup){
+    clearTimeout(_longPressTimer);
+    _longPressTimer=setTimeout(()=>{
+      if(!_tMoved && _tAct){
+        const hitItem=findItemAtPos(p.x, p.y);
+        if(hitItem){
+          _longPressTriggered=true;
+          if(hitItem.type==='grid'){
+            openItemDetail(hitItem.id);
+          } else if(hitItem.type==='seed'){
+            openSeedDetail(hitItem.id, hitItem.plot);
+          }
+        }
+      }
+    }, 500);
+  }
   e.preventDefault();
 }, {passive:false});
 canvas.addEventListener('touchmove', e=>{
@@ -1483,13 +1524,46 @@ canvas.addEventListener('touchmove', e=>{
     const pp=currentPopup, clipH=pp.ph-pp.titleH-pp.tabsH-36;
     pp.scrollY=clamp(pp.scrollY-dy, 0, Math.max(0, pp._cy-clipH));
   } else if(Math.abs(p.x-_tsx)>8 || Math.abs(p.y-_tsy)>8) _tMoved=true;
+  if(_tMoved) clearTimeout(_longPressTimer);
   e.preventDefault();
 }, {passive:false});
 canvas.addEventListener('touchend', e=>{
   if(!_tAct) return; _tAct=false;
+  clearTimeout(_longPressTimer);
   const t=(e.changedTouches&&e.changedTouches[0]); if(!t) return;
   const p=_tPt(t);
-  if(currentPopup){ if(!_tMoved) handlePopupClick(p.x,p.y); }
+  if(currentPopup){
+    // 如果长按已触发，不再处理点击
+    if(_longPressTriggered){ _longPressTriggered=false; return; }
+    if(!_tMoved){
+      // 双击检测：查找点击位置的物品
+      const hitItem = findItemAtPos(p.x, p.y);
+      const now = Date.now();
+      if(hitItem && _lastTapItem===hitItem.id && (now-_lastTapTime)<350){
+        // 双击：食用可食用物品
+        if(hitItem.type==='grid' && (hitItem.id in EDIBLE)){
+          doEat(hitItem.id);
+          hoverGridItem=null;
+          _lastTapTime=0; _lastTapItem=null;
+          // 刷新背包
+          if((state.inv[hitItem.id]||0)<=0){
+            closePopup(); openBackpack();
+          }
+        } else if(hitItem.type==='seed'){
+          // 种子双击：播种
+          if(hitItem.plot && (state.inv[hitItem.id]||0)>0){
+            plantWith(hitItem.plot, hitItem.id);
+            closePopup();
+          }
+        }
+      } else {
+        // 单击：显示悬浮提示
+        _lastTapTime=now;
+        _lastTapItem=hitItem?hitItem.id:null;
+        handlePopupClick(p.x,p.y);
+      }
+    }
+  }
   else if(!_tMoved) onPointerDown(p.x,p.y);
   e.preventDefault();
 }, {passive:false});
@@ -1509,6 +1583,47 @@ canvas.addEventListener('wheel', e=>{
 let toastMsg='', toastT=0;
 let hoverInv=null;
 function toast(m){ toastMsg=m; toastT=2.2; }
+
+/* ---------------- 悬浮提示系统 ---------------- */
+let hoverGridItem=null;  // 当前悬停的格子物品 {id, type:'grid'|'seed', plot, x, y, w, h}
+let _lastTapTime=0;      // 上次点击时间（用于双击检测）
+let _lastTapItem=null;   // 上次点击的物品ID
+let contextMenu=null;    // 右键菜单 {x, y, id, visible, edible}
+
+// 查找指定位置的格子物品
+function findItemAtPos(mx, my){
+  const p=currentPopup; if(!p) return null;
+  const pad=18;
+  const px=(cw-p.pw)/2, py=(ch-p.ph)/2;
+  const top=py+p.titleH+p.tabsH+pad;
+  const localY = my - top + p.scrollY;
+  for(const it of p.items){
+    if(it.type==='gridCell' || it.type==='seedCell'){
+      if(mx>=px+pad+it.x && mx<=px+pad+it.x+it.w && localY>=it.y && localY<=it.y+it.h){
+        return {id:it.id, type:it.type==='gridCell'?'grid':'seed', plot:it.plot||null};
+      }
+    }
+  }
+  return null;
+}
+
+// 右键菜单事件（电脑端）
+canvas.addEventListener('contextmenu', e=>{
+  e.preventDefault();
+  if(!currentPopup) return;
+  const r=canvas.getBoundingClientRect();
+  const mx=e.clientX-r.left, my=e.clientY-r.top;
+  const hitItem = findItemAtPos(mx, my);
+  if(hitItem && hitItem.type==='grid' && (hitItem.id in EDIBLE)){
+    contextMenu={x:mx, y:my, id:hitItem.id, visible:true, edible:true, itemType:'grid'};
+  } else if(hitItem && hitItem.type==='grid'){
+    contextMenu={x:mx, y:my, id:hitItem.id, visible:true, edible:false, itemType:'grid'};
+  } else if(hitItem && hitItem.type==='seed'){
+    contextMenu={x:mx, y:my, id:hitItem.id, visible:true, edible:false, itemType:'seed', plot:hitItem.plot};
+  } else {
+    contextMenu=null;
+  }
+});
 
 /* ---------------- 交互NPC ---------------- */
 function nearestNPC(){
@@ -2502,6 +2617,10 @@ function finalizePopup(p){ /* 占位：scrollMax 在绘制时计算 */ }
 
 function handlePopupClick(mx,my){
   const p=currentPopup; if(!p) return;
+  // 先处理右键菜单点击
+  if(contextMenu && contextMenu.visible){
+    if(handleContextMenuClick(mx, my)) return;
+  }
   const pad=18;
   const px=(cw-p.pw)/2, py=(ch-p.ph)/2, pw=p.pw, ph=p.ph;
   p.px=px; p.py=py;
@@ -2529,16 +2648,29 @@ function handlePopupClick(mx,my){
       }
     } else if(it.type==='gridCell'){
       if(mx>=px+pad+it.x && mx<=px+pad+it.x+it.w && localY>=it.y && localY<=it.y+it.h){
-        openItemDetail(it.id);
+        // 单击：显示/隐藏悬浮提示
+        if(hoverGridItem && hoverGridItem.id===it.id){
+          hoverGridItem=null; // 再次点击关闭
+        } else {
+          hoverGridItem={id:it.id, type:'grid', x:px+pad+it.x, y:top+it.y-p.scrollY, w:it.w, h:it.h};
+        }
         return;
       }
     } else if(it.type==='seedCell'){
       if(mx>=px+pad+it.x && mx<=px+pad+it.x+it.w && localY>=it.y && localY<=it.y+it.h){
-        openSeedDetail(it.id, it.plot);
+        // 单击：显示/隐藏悬浮提示
+        if(hoverGridItem && hoverGridItem.id===it.id){
+          hoverGridItem=null; // 再次点击关闭
+        } else {
+          hoverGridItem={id:it.id, type:'seed', plot:it.plot, x:px+pad+it.x, y:top+it.y-p.scrollY, w:it.w, h:it.h};
+        }
         return;
       }
     }
   }
+  // 点击空白区域关闭悬浮提示和右键菜单
+  hoverGridItem=null;
+  if(contextMenu) contextMenu=null;
 }
 
 function drawPopup(){
@@ -2793,6 +2925,199 @@ function drawPopup(){
   }
   ctx.textAlign='left';
 }
+
+/* ---------------- 格子悬浮提示绘制 ---------------- */
+function drawGridTooltip(){
+  if(!hoverGridItem || !currentPopup) return;
+  const id = hoverGridItem.id;
+  const it = ITEMS[id];
+  if(!it) return;
+
+  const isSeed = hoverGridItem.type==='seed';
+  const info = isSeed ? CROP_INFO[id] : null;
+  const cropId = isSeed ? SEED_TO_CROP[id] : null;
+  const qty = state.inv[id] || 0;
+  const edible = !isSeed && (id in EDIBLE);
+
+  // 计算提示框内容
+  const lines = [];
+  lines.push({text:it.name, size:14, bold:true, color:'#fff'});
+  if(isSeed && info){
+    const curS = curSeason();
+    const canPlant = info.seasons.indexOf(curS)>=0;
+    lines.push({text:'适宜季节：'+info.seasons.join('、')+'季', size:12, color:canPlant?'#8FD88F':'#FFD080'});
+    lines.push({text:'成熟天数：'+info.growDays+'天（需每日浇水）', size:12, color:'#ddd'});
+    if(info.multiHarvest){
+      lines.push({text:'多次收获：可收获'+info.harvestCount+'次', size:12, color:'#8FD88F'});
+    } else {
+      lines.push({text:'一次性收获', size:12, color:'#ddd'});
+    }
+    if(cropId && ITEMS[cropId]){
+      lines.push({text:'收获：'+ITEMS[cropId].name, size:12, color:'#ddd'});
+    }
+  } else {
+    lines.push({text:it.desc, size:12, color:'#ddd'});
+    lines.push({text:'数量：'+qty, size:12, color:'#ccc'});
+    if(edible){
+      lines.push({text:'🍴 食用恢复 '+EDIBLE[id]+' 体力', size:12, color:'#FFB860'});
+    }
+  }
+  if(!isSeed && edible){
+    lines.push({text:'双击食用 · 右键菜单', size:11, color:'#aaa'});
+  } else if(isSeed){
+    lines.push({text:'双击播种 · 右键详情', size:11, color:'#aaa'});
+  } else {
+    lines.push({text:'右键查看详情', size:11, color:'#aaa'});
+  }
+
+  // 计算尺寸
+  setFont(14,true);
+  let maxW = 0;
+  for(const l of lines){
+    setFont(l.size, l.bold);
+    const w = ctx.measureText(l.text).width;
+    if(w>maxW) maxW = w;
+  }
+  const pad = 12;
+  const lineH = 18;
+  const tipW = maxW + pad*2;
+  const tipH = lines.length * lineH + pad*2 - 4;
+
+  // 位置：跟随鼠标，避免超出屏幕
+  let tx = mouseX + 16;
+  let ty = mouseY - tipH - 8;
+  if(tx + tipW > cw) tx = cw - tipW - 4;
+  if(ty < 4) ty = mouseY + 20;
+  if(ty + tipH > ch) ty = ch - tipH - 4;
+
+  // 绘制背景
+  rr(ctx, tx, ty, tipW, tipH, 10);
+  ctx.fillStyle = 'rgba(40,30,18,0.95)';
+  ctx.fill();
+  ctx.lineWidth = 1.5;
+  ctx.strokeStyle = COL.border;
+  ctx.stroke();
+
+  // 绘制文本
+  let ly = ty + pad + 12;
+  for(const l of lines){
+    setFont(l.size, l.bold||false);
+    ctx.fillStyle = l.color;
+    ctx.textAlign = 'left';
+    ctx.fillText(l.text, tx + pad, ly);
+    ly += lineH;
+  }
+}
+
+/* ---------------- 右键菜单绘制 ---------------- */
+function drawContextMenu(){
+  if(!contextMenu || !contextMenu.visible) return;
+  const id = contextMenu.id;
+  const it = ITEMS[id];
+  if(!it) return;
+
+  const menuW = 130;
+  const menuH = contextMenu.edible ? 108 : 72;
+  let mx = contextMenu.x;
+  let my = contextMenu.y;
+  if(mx + menuW > cw) mx = cw - menuW - 4;
+  if(my + menuH > ch) my = ch - menuH - 4;
+
+  // 背景
+  rr(ctx, mx, my, menuW, menuH, 8);
+  ctx.fillStyle = 'rgba(50,38,22,0.97)';
+  ctx.fill();
+  ctx.lineWidth = 2;
+  ctx.strokeStyle = COL.border;
+  ctx.stroke();
+
+  let yOff = 4;
+  // 食用按钮（如果可食用）
+  if(contextMenu.edible){
+    const hover1 = mouseX>=mx+4&&mouseX<=mx+menuW-4&&mouseY>=my+yOff&&mouseY<=my+yOff+28;
+    rr(ctx, mx+4, my+yOff, menuW-8, 28, 6);
+    ctx.fillStyle = hover1 ? '#E8913C' : 'rgba(232,145,60,0.3)';
+    ctx.fill();
+    setFont(13, true);
+    ctx.fillStyle = '#fff';
+    ctx.textAlign = 'center';
+    ctx.fillText('🍴 食用', mx+menuW/2, my+yOff+19);
+    yOff += 34;
+  }
+
+  // 查看详情按钮
+  const hover2 = mouseX>=mx+4&&mouseX<=mx+menuW-4&&mouseY>=my+yOff&&mouseY<=my+yOff+28;
+  rr(ctx, mx+4, my+yOff, menuW-8, 28, 6);
+  ctx.fillStyle = hover2 ? 'rgba(143,179,107,0.5)' : 'rgba(143,179,107,0.2)';
+  ctx.fill();
+  setFont(13, false);
+  ctx.fillStyle = '#ccc';
+  ctx.textAlign = 'center';
+  ctx.fillText('📋 查看详情', mx+menuW/2, my+yOff+19);
+  yOff += 34;
+
+  // 取消按钮
+  const hover3 = mouseX>=mx+4&&mouseX<=mx+menuW-4&&mouseY>=my+yOff&&mouseY<=my+yOff+28;
+  rr(ctx, mx+4, my+yOff, menuW-8, 28, 6);
+  ctx.fillStyle = hover3 ? 'rgba(200,168,107,0.5)' : 'rgba(200,168,107,0.2)';
+  ctx.fill();
+  setFont(13, false);
+  ctx.fillStyle = '#ccc';
+  ctx.textAlign = 'center';
+  ctx.fillText('取消', mx+menuW/2, my+yOff+19);
+
+  ctx.textAlign = 'left';
+}
+
+// 右键菜单点击处理
+function handleContextMenuClick(mx, my){
+  if(!contextMenu || !contextMenu.visible) return false;
+  const menuW = 130;
+  const menuH = contextMenu.edible ? 108 : 72;
+  let cmx = contextMenu.x, cmy = contextMenu.y;
+  if(cmx + menuW > cw) cmx = cw - menuW - 4;
+  if(cmy + menuH > ch) cmy = ch - menuH - 4;
+
+  if(mx>=cmx && mx<=cmx+menuW && my>=cmy && my<=cmy+menuH){
+    let yOff = 4;
+    // 食用按钮
+    if(contextMenu.edible){
+      if(mx>=cmx+4&&mx<=cmx+menuW-4&&my>=cmy+yOff&&my<=cmy+yOff+28){
+        const eatId = contextMenu.id;
+        doEat(eatId);
+        contextMenu=null;
+        hoverGridItem=null;
+        if((state.inv[eatId]||0)<=0){
+          closePopup(); openBackpack();
+        }
+        return true;
+      }
+      yOff += 34;
+    }
+    // 查看详情按钮
+    if(mx>=cmx+4&&mx<=cmx+menuW-4&&my>=cmy+yOff&&my<=cmy+yOff+28){
+      const detailId = contextMenu.id;
+      const detailType = contextMenu.itemType;
+      const detailPlot = contextMenu.plot;
+      contextMenu=null;
+      hoverGridItem=null;
+      if(detailType==='seed'){
+        openSeedDetail(detailId, detailPlot);
+      } else {
+        openItemDetail(detailId);
+      }
+      return true;
+    }
+    yOff += 34;
+    // 取消按钮
+    if(mx>=cmx+4&&mx<=cmx+menuW-4&&my>=cmy+yOff&&my<=cmy+yOff+28){
+      contextMenu=null;
+      return true;
+    }
+  }
+  contextMenu=null;
+  return false;
+}
 function shade(hex, amt){
   // 简单明暗
   if(hex[0]!=='#') return hex;
@@ -2834,7 +3159,8 @@ function openHelp(){
     '【任务】找 NPC 接取任务，满足条件的任务可在 NPC 处提交领取奖励。',
     '【等级】劳作/交谈/完成任务可获得经验值，升级后体力上限提升、背包格子+4。经验获取有衰减防刷级。',
     '【声望】完成主线任务、NPC委托、好感剧情、村庄建设获取声望（上限320），作为功能解锁门槛。',
-    '【背包】点击顶部菜单【背包】查看等级、经验、声望、体力、背包物品，可食用物品直接点击食用恢复体力。',
+    '【背包】点击顶部菜单【背包】查看等级、经验、声望、体力、背包物品。悬停/单击显示详情，双击食用，右键菜单（电脑），长按详情（手机）。',
+    '【种子】种植时选择种子，悬停/单击显示作物信息，双击播种，右键菜单（电脑），长按详情（手机）。',
     '【房屋】找木伯升级房屋，提升储物箱容量。需满足等级+声望+材料条件。',
     '【存档】自动保存在本地浏览器(localStorage)。',
     '【提示】所有界面均为 Canvas 绘制，弹窗内可用鼠标滚轮滚动。',
@@ -3829,6 +4155,8 @@ function loop(ts){
     drawBottomBar();
     drawMenuButtons();
     if(currentPopup) drawPopup();
+    if(currentPopup) drawGridTooltip();
+    if(currentPopup) drawContextMenu();
     drawTooltip();
     if(toastT>0){
       setFont(15,true);
