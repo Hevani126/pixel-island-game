@@ -1285,7 +1285,7 @@ function save(){
       unlockedPlotCount:state.unlockedPlotCount, inv:state.inv, goodwill:state.goodwill,
       quests:state.quests, codex:state.codex, invOrder:state.invOrder, carpenterDiscount:state.carpenterDiscount, mainStoryUnlocked:state.mainStoryUnlocked, helpers:state.helpers,
       randomQuests:state.randomQuests||{}, randomGifts:state.randomGifts||{},
-      plots: map.plots.map(p=>({tx:p.tx,ty:p.ty,stage:p.stage,crop:p.crop,watered:p.watered})),
+      plots: map.plots.map(p=>({tx:p.tx,ty:p.ty,stage:p.stage,crop:p.crop,watered:p.watered,outOfSeason:p.outOfSeason||false,growDays:p.growDays||0})),
     };
     localStorage.setItem(SAVE_KEY, JSON.stringify(d));
   }catch(e){}
@@ -1342,7 +1342,7 @@ function load(){
     if(state.stamina>state.maxStamina) state.stamina=state.maxStamina;
     map = buildMap();
     // 重建农田
-    map.plots = d.plots.map(p=>({tx:p.tx,ty:p.ty,stage:p.stage,crop:p.crop,watered:p.watered}));
+    map.plots = d.plots.map(p=>({tx:p.tx,ty:p.ty,stage:p.stage,crop:p.crop,watered:p.watered,outOfSeason:p.outOfSeason||false,growDays:p.growDays||0}));
     // 额外农田占用（解锁过的不应再被随机占用——已通过 plotSlots 未被占用，安全）
     for(const p of map.plots) map.occupied.add(key(p.tx,p.ty));
     return true;
@@ -1810,7 +1810,21 @@ function openSeedDetail(seedId, plot){
     addText(p,'🗓 适宜季节：' + seasonStr, 0, cw0, canPlant ? COL.accent2 : '#D88', 14); addGap(p, 4);
 
     // 成熟天数
-    addText(p,'⏰ 成熟天数：' + info.growDays + ' 天（需每日浇水）', 0, cw0, COL.text, 14); addGap(p, 4);
+    if(canPlant){
+      addText(p,'⏰ 成熟天数：' + info.growDays + ' 天（需每日浇水）', 0, cw0, COL.text, 14);
+    } else {
+      addText(p,'⏰ 成熟天数：' + (info.growDays * 3) + ' 天（非当季，3倍生长时间）', 0, cw0, '#D88', 14);
+    }
+    addGap(p, 4);
+
+    // 非当季警告
+    if(!canPlant){
+      addText(p,'⚠️ 非当季种植风险：', 0, cw0, '#E85050', 13); addGap(p, 2);
+      addText(p,'  • 生长速度变为原来的 1/3', 0, cw0, '#D88', 12);
+      addText(p,'  • 生长期间必须是晴天', 0, cw0, '#D88', 12);
+      addText(p,'  • 遇到非晴天（多云/雨/雪等）直接枯萎', 0, cw0, '#D88', 12);
+      addGap(p, 4);
+    }
 
     // 收获方式
     if(info.multiHarvest){
@@ -1829,7 +1843,7 @@ function openSeedDetail(seedId, plot){
   addGap(p, 10);
 
   // 播种按钮
-  const btnLabel = canPlant ? '播种（消耗1个' + it.name + '）' : '⚠️ 非当季播种（仍可种但生长缓慢）';
+  const btnLabel = canPlant ? '播种（消耗1个' + it.name + '）' : '⚠️ 非当季播种（生长缓慢+需晴天）';
   addButton(p, btnLabel, 0, cw0, 36, () => {
     plantWith(plot, seedId);
     closePopup();
@@ -1846,9 +1860,18 @@ function openSeedDetail(seedId, plot){
 }
 function plantWith(p, seed){
   p.stage='seeded'; p.crop=SEED_TO_CROP[seed]; p.watered=false;
+  // 检测是否为非当季种植
+  const info = CROP_INFO[seed];
+  const curS = curSeason();
+  p.outOfSeason = info ? (info.seasons.indexOf(curS) < 0) : false;
+  p.growDays = 0;  // 生长天数计数器
   state.inv[seed]--; if(state.inv[seed]<=0) delete state.inv[seed];
   spend(5); state.codex[seed]=true; addExp(8);
-  toast('播种了 '+ITEMS[seed].name);
+  if(p.outOfSeason){
+    toast('⚠️ 非当季播种 '+ITEMS[seed].name+'（生长缓慢，需晴天养护）');
+  } else {
+    toast('播种了 '+ITEMS[seed].name);
+  }
   save();
 }
 function doCollect(){
@@ -1912,33 +1935,64 @@ function finishSleep(){
   const storm = (W==='雷阵雨');
   const lightSnow = (W==='小雪');
   const heavySnow = (W==='大雪');
+  const isSunny = (W==='晴');
+  // 非当季作物生长倍数（3倍时间）
+  const OUT_OF_SEASON_DAYS = 3;
   // 作物生长 + 天气影响
   for(const p of map.plots){
     if(storm) p.watered=true;                 // 雷阵雨：全田自动浇水
+    // 非当季作物：非晴天直接枯萎
+    if(p.outOfSeason && !isSunny && (p.stage==='seeded' || p.stage==='growing')){
+      p.stage='tilled'; p.crop=null; p.watered=false; p.outOfSeason=false; p.growDays=0;
+      toast('🥀 非当季作物因天气不佳枯萎了');
+      continue;
+    }
     if(p.watered){
       if(p.stage==='seeded'){
         if(storm){                             // 新种子高概率冲毁
-          if(Math.random()<0.7){ p.stage='tilled'; p.crop=null; }
+          if(Math.random()<0.7){ p.stage='tilled'; p.crop=null; p.outOfSeason=false; p.growDays=0; }
           else p.stage='growing';
         } else if(lightSnow){                  // 小雪：仅耐寒作物正常生长
           if(COLD_RESIST[p.crop]) p.stage='growing';
         } else if(heavySnow){                  // 大雪：非冬作物大概率枯死；冬作物减速
-          if(!COLD_RESIST[p.crop]){ if(Math.random()<0.7){ p.stage='tilled'; p.crop=null; } }
+          if(!COLD_RESIST[p.crop]){ if(Math.random()<0.7){ p.stage='tilled'; p.crop=null; p.outOfSeason=false; p.growDays=0; } }
           else if(Math.random()<0.5) p.stage='growing';
-        } else { p.stage='growing'; }
+        } else {
+          // 非当季作物需要3天才能从seeded到growing
+          if(p.outOfSeason){
+            p.growDays = (p.growDays||0) + 1;
+            if(p.growDays >= OUT_OF_SEASON_DAYS){
+              p.stage='growing';
+              p.growDays=0;
+            }
+          } else {
+            p.stage='growing';
+          }
+        }
       } else if(p.stage==='growing'){
         if(heavySnow && !COLD_RESIST[p.crop]){ // 非冬作物大雪枯死
-          if(Math.random()<0.7){ p.stage='tilled'; p.crop=null; } else p.stage='mature';
+          if(Math.random()<0.7){ p.stage='tilled'; p.crop=null; p.outOfSeason=false; p.growDays=0; } else p.stage='mature';
         } else if(lightSnow){
           if(COLD_RESIST[p.crop]) p.stage='mature'; // 仅耐寒成熟
         } else if(heavySnow){
           if(COLD_RESIST[p.crop] && Math.random()<0.5) p.stage='mature';
-        } else { p.stage='mature'; }
+        } else {
+          // 非当季作物需要3天才能从growing到mature
+          if(p.outOfSeason){
+            p.growDays = (p.growDays||0) + 1;
+            if(p.growDays >= OUT_OF_SEASON_DAYS){
+              p.stage='mature';
+              p.growDays=0;
+            }
+          } else {
+            p.stage='mature';
+          }
+        }
       }
       p.watered=false;
     }
     // 成熟作物小概率雷击损毁（雷阵雨）
-    if(storm && p.stage==='mature' && Math.random()<0.15){ p.stage='tilled'; p.crop=null; p.watered=false; }
+    if(storm && p.stage==='mature' && Math.random()<0.15){ p.stage='tilled'; p.crop=null; p.watered=false; p.outOfSeason=false; p.growDays=0; }
   }
   // 采集物/动物/树木/石头重置 + 天气影响采集物
   for(const r of map.resources){
@@ -2971,7 +3025,12 @@ function drawGridTooltip(){
     const curS = curSeason();
     const canPlant = info.seasons.indexOf(curS)>=0;
     lines.push({text:'适宜季节：'+info.seasons.join('、')+'季', size:12, color:canPlant?'#8FD88F':'#FFD080'});
-    lines.push({text:'成熟天数：'+info.growDays+'天（需每日浇水）', size:12, color:'#ddd'});
+    if(canPlant){
+      lines.push({text:'成熟天数：'+info.growDays+'天（需每日浇水）', size:12, color:'#ddd'});
+    } else {
+      lines.push({text:'成熟天数：'+(info.growDays*3)+'天（非当季3倍）', size:12, color:'#FFD080'});
+      lines.push({text:'⚠️ 非当季：需晴天，否则枯萎', size:12, color:'#E85050'});
+    }
     if(info.multiHarvest){
       lines.push({text:'多次收获：可收获'+info.harvestCount+'次', size:12, color:'#8FD88F'});
     } else {
@@ -3185,7 +3244,8 @@ function openHelp(){
     '【等级】劳作/交谈/完成任务可获得经验值，升级后体力上限提升、背包格子+4。经验获取有衰减防刷级。',
     '【声望】完成主线任务、NPC委托、好感剧情、村庄建设获取声望（上限320），作为功能解锁门槛。',
     '【背包】点击顶部菜单【背包】查看等级、经验、声望、体力、背包物品。悬停/单击显示详情，双击食用，右键菜单（电脑），长按详情（手机）。',
-    '【种子】种植时选择种子，悬停/单击显示作物信息，双击播种，右键菜单（电脑），长按详情（手机）。',
+    '【种子】种植时选择种子，悬停/单击显示作物信息，双击播种，右键菜单（电脑），长按详情（手机）。非当季种植：3倍生长期+需全程晴天。',
+    '【天气】天气影响作物生长：雷阵雨冲毁新种子、大雪冻死非耐寒作物。非当季作物遇到非晴天直接枯萎。',
     '【房屋】找木伯升级房屋，提升储物箱容量。需满足等级+声望+材料条件。',
     '【存档】自动保存在本地浏览器(localStorage)。',
     '【提示】所有界面均为 Canvas 绘制，弹窗内可用鼠标滚轮滚动。',
