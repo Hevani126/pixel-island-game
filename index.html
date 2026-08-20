@@ -1,0 +1,3453 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=1.0,user-scalable=no">
+<title>像素小岛 · 种田模拟</title>
+<style>
+  html,body{margin:0;padding:0;height:100%;overflow:hidden;overscroll-behavior:none;
+    background:#2b2519;font-family:'Microsoft YaHei','PingFang SC',sans-serif;
+    -webkit-user-select:none;user-select:none;-webkit-tap-highlight-color:transparent;}
+  #game{display:block;position:absolute;top:0;left:0;cursor:default;touch-action:none;}
+  /* 移动端虚拟控制（DOM 覆盖层：固定定位、等比、不拉伸变形） */
+  #dpad{position:fixed;left:12px;bottom:12px;z-index:20;width:144px;height:144px;
+    touch-action:none;pointer-events:none;display:none;}
+  .dbtn{position:absolute;width:46px;height:46px;pointer-events:auto;touch-action:none;
+    display:flex;align-items:center;justify-content:center;border-radius:12px;
+    background:rgba(40,30,18,0.55);color:#fff;border:2px solid rgba(255,255,255,0.35);
+    font-size:22px;font-weight:bold;user-select:none;-webkit-user-select:none;}
+  .dbtn:active{background:rgba(70,52,30,0.85);}
+  #dpUp{left:49px;top:0} #dpDown{left:49px;bottom:0}
+  #dpLeft{left:0;top:49px} #dpRight{left:98px;top:49px}
+  #dpA{left:49px;top:49px;background:rgba(200,120,60,0.75)}
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<script>
+"use strict";
+/* ============================================================
+   像素小岛 — 纯 Canvas 单文件种田模拟
+   全部画面/角色/UI 均由 Canvas 绘图 API 绘制，无外部资源。
+   ============================================================ */
+
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+let dpr=1, cw=0, ch=0;
+function resize(){
+  dpr = window.devicePixelRatio||1;
+  cw = window.innerWidth; ch = window.innerHeight;
+  canvas.width = Math.floor(cw*dpr); canvas.height = Math.floor(ch*dpr);
+  canvas.style.width = cw+'px'; canvas.style.height = ch+'px';
+  ctx.setTransform(dpr,0,0,dpr,0,0);
+  ctx.textBaseline='alphabetic';
+}
+window.addEventListener('resize', resize);
+
+/* ---------------- 配置 ---------------- */
+const TILE = 46;
+const MAP_W = 74, MAP_H = 51;   // 按用户设计规划图：74列(A-BV) × 51行(0-50)，主纵 x=20/41、上横 y=19、下横 y=31
+const WORLD_W = MAP_W*TILE, WORLD_H = MAP_H*TILE;
+const SEASONS = ['春','夏','秋','冬'];
+const SEASON_DAYS = 7;
+// 星期系统（仅用于 UI 显示与孩童作息逻辑，不改季节/天数/时间/天气原有机制）
+const WEEKDAYS = ['周一','周二','周三','周四','周五','周六','周日'];
+function weekdayIndex(){ return ((state.day-1)%7+7)%7; }   // 第1天=周一，7天一循环
+function weekdayName(){ return WEEKDAYS[weekdayIndex()]; }
+const DAY_SECONDS = 1200;          // 真实秒数 = 1 游戏日（约20分钟）
+const TIME_SPEED = 24/DAY_SECONDS; // 每小时对应的真实秒推进
+
+/* ---------------- 天气系统（9 种天气） ---------------- */
+const WEATHER_LIST = ['晴','多云','小雨','大雨','雷阵雨','台风','霜冻','小雪','大雪'];
+// 灾害天气（固定持续 1 天，且 N肉地图隐藏）：雷阵雨/台风/大雪
+const DISASTER_W = {'雷阵雨':1,'台风':1,'大雪':1};
+function isDisaster(w){ return !!DISASTER_W[w]; }
+function curSeason(){ return SEASONS[Math.floor((state.day-1)/SEASON_DAYS)%4]; }
+// 季节天气概率表
+function seasonPool(season){
+  if(season==='春') return {晴:35,多云:25,小雨:20,大雨:10,雷阵雨:8,霜冻:2};
+  if(season==='夏') return {晴:30,多云:20,小雨:15,大雨:15,雷阵雨:12,台风:8};
+  if(season==='秋') return {晴:40,多云:30,小雨:20,大雨:10};
+  return {晴:25,多云:25,霜冻:20,小雪:20,大雪:10}; // 冬
+}
+// 抽一天天气：遵守灾害冷却与雷阵雨不连两天
+function rollWeatherDay(day, prevW){
+  const pool=seasonPool(curSeason());
+  let avail=Object.keys(pool);
+  if((state.lastTyphoonDay!==undefined) && (day - state.lastTyphoonDay) < 7) avail=avail.filter(k=>k!=='台风');
+  if((state.lastSnowDay!==undefined)   && (day - state.lastSnowDay)   < 5) avail=avail.filter(k=>k!=='大雪');
+  if(prevW==='雷阵雨') avail=avail.filter(k=>k!=='雷阵雨');
+  let sum=avail.reduce((s,k)=>s+pool[k],0);
+  if(sum<=0){ avail=['晴']; sum=1; }
+  let r=Math.random()*sum;
+  for(const k of avail){ r-=pool[k]; if(r<=0) return k; }
+  return avail[avail.length-1];
+}
+function weatherDuration(w){ return isDisaster(w)?1:rndInt(1,3); }
+// 应用某天气，并预滚“之后”的天气（供次日预报）
+function applyWeather(w, day){
+  state.weather=w; state.weatherDays=weatherDuration(w);
+  if(w==='台风') state.lastTyphoonDay=day;
+  if(w==='大雪') state.lastSnowDay=day;
+  const nw=rollWeatherDay(day+1, w);
+  state.pendingWeather=nw; state.pendingDays=weatherDuration(nw);
+}
+// 开局初始化天气
+function initWeather(){
+  if(state.weatherDays===undefined) state.weatherDays=1;
+  if(state.pendingWeather===undefined) state.pendingWeather='晴';
+  if(state.lastTyphoonDay===undefined) state.lastTyphoonDay=-99;
+  if(state.lastSnowDay===undefined) state.lastSnowDay=-99;
+  applyWeather(rollWeatherDay(state.day, null), state.day);
+}
+
+const COL = {
+  grassA:'#C2D291', grassB:'#B7C983', road:'#Dcc79c', roadLine:'#cdb483',
+  plaza:'#E7DCC4', plaza2:'#DBCFB0',
+  water:'#7FB4D6', water2:'#6FA8CE',
+  panel:'rgba(255,250,238,0.96)', panelSolid:'#FFF7E8', mask:'rgba(40,30,15,0.45)',
+  border:'#C8A86B', text:'#5C4326', sub:'#8A6F4A', faint:'#B9A079',
+  accent:'#E0A45E', accent2:'#8FB36B', barBg:'#E7D8BC',
+  shadow:'rgba(90,60,30,0.18)', plotTill:'#9c6b3f', plotTill2:'#8a5d35',
+  plotSeed:'#a9c06a', plotGrow:'#7fae4e', plotMature:'#e7c24a',
+};
+
+/* ---------------- 物品字典 ---------------- */
+const ITEMS = {
+  wheat_seed:{name:'小麦种子',color:'#D9B36A',shape:'seed'},
+  carrot_seed:{name:'胡萝卜种子',color:'#E0893C',shape:'seed'},
+  tomato_seed:{name:'番茄种子',color:'#E2533B',shape:'seed'},
+  wheat:{name:'小麦',color:'#E3C067',shape:'grain'},
+  carrot:{name:'胡萝卜',color:'#EF8B3C',shape:'root'},
+  tomato:{name:'番茄',color:'#E5483B',shape:'round'},
+  wood:{name:'木头',color:'#9C6B3F',shape:'log'},
+  stone:{name:'石头',color:'#9AA0A6',shape:'rock'},
+  fiber:{name:'纤维',color:'#A7C46B',shape:'leaf'},
+  berry:{name:'浆果',color:'#C0407A',shape:'berry'},
+  mushroom:{name:'蘑菇',color:'#D96B5B',shape:'mush'},
+  flower:{name:'鲜花',color:'#E58FB0',shape:'flower'},
+  fish_carp:{name:'鲤鱼',color:'#C98B5A',shape:'fish'},
+  fish_bass:{name:'鲈鱼',color:'#7FA0B0',shape:'fish'},
+  shrimp:{name:'河虾',color:'#E0956B',shape:'shrimp'},
+  milk:{name:'牛奶',color:'#F2EFE6',shape:'bottle'},
+  egg:{name:'鸡蛋',color:'#F3E9C8',shape:'egg'},
+  wool:{name:'羊毛',color:'#F0EAD8',shape:'fluff'},
+  coin:{name:'金币',color:'#E8C24A',shape:'coin'},
+  bait:{name:'鱼饵',color:'#C9A24B',shape:'bag'},
+  rod:{name:'鱼竿',color:'#B5824A',shape:'rod'},
+  mystery_seed:{name:'神秘种子',color:'#9B6BC4',shape:'seed'},
+  herb:{name:'草药',color:'#7BA05B',shape:'leaf'},
+  potion:{name:'体力药剂',color:'#C86BB0',shape:'bottle'},
+  pelt:{name:'兽皮',color:'#C9A06B',shape:'fur'},
+  rare_seed:{name:'稀有种子',color:'#B06BD0',shape:'seed'},
+  iceflower:{name:'冰花',color:'#9FD8E8',shape:'flower'},
+  pinecone:{name:'松果',color:'#9C6B3F',shape:'nut'},
+  trap:{name:'捕兽夹',color:'#8A8F94',shape:'trap'},
+  dish:{name:'料理',color:'#E0A45E',shape:'dish'},
+  fish_soup:{name:'鱼汤',color:'#C9A24B',shape:'dish'},
+  bread:{name:'麦饼',color:'#E0B36B',shape:'dish'},
+  stew:{name:'炖菜',color:'#B98A6B',shape:'dish'},
+  // 剧情任务所需物品
+  potato_seed:{name:'土豆种子',color:'#C9A24B',shape:'seed'},
+  potato:{name:'土豆',color:'#D8B96A',shape:'round'},
+  resin:{name:'树脂',color:'#C98A3C',shape:'drop'},
+  vine:{name:'藤蔓',color:'#7BA05B',shape:'leaf'},
+  pottery:{name:'古陶碎片',color:'#B98A6B',shape:'shard'},
+  chisel:{name:'老凿子',color:'#9AA0A6',shape:'tool'},
+  relic:{name:'河底遗物',color:'#7FA0B0',shape:'round'},
+  trinket:{name:'旅人遗物',color:'#C9A06B',shape:'trinket'},
+  page:{name:'古籍残页',color:'#C9B26B',shape:'page'},
+  mat_adv:{name:'高级建材',color:'#B98B5B',shape:'log'},
+  fertilizer:{name:'高级肥料',color:'#8FB36B',shape:'bag'},
+};
+// 可食用物品 → 食用后恢复的体力值
+// 动物产出：牛奶/鸡蛋；野果野菜：浆果/蘑菇/鲜花/冰花；部分草药：草药；鱼类：鲤鱼/鲈鱼/河虾；料理（小信处购买，含通用料理/鱼汤/麦饼/炖菜）；体力药剂
+const EDIBLE = {
+  milk:18, egg:15,
+  berry:10, mushroom:12, flower:8, iceflower:10,
+  herb:14,
+  fish_carp:16, fish_bass:16, shrimp:12,
+  dish:30, fish_soup:35, bread:20, stew:40,
+  potion:50,
+};
+// 耐寒作物（小雪正常生长；大雪仅其减速生长，非耐寒作物大概率枯死）
+const COLD_RESIST = {wheat:true, carrot:true, potato:true};
+// 冬日专属采集物（小雪刷新）
+const WINTER_RES = ['iceflower','pinecone'];
+const SEED_TO_CROP = {wheat_seed:'wheat', carrot_seed:'carrot', tomato_seed:'tomato', potato_seed:'potato'};
+
+/* ---------------- 工具 ---------------- */
+function clamp(v,a,b){return v<a?a:(v>b?b:v);}
+// 体力消耗（大雪灾害天气消耗大幅上升）
+function spend(n){ state.stamina -= n * (state.weather==='大雪'?1.8:1); }
+function rnd(a,b){return a+Math.random()*(b-a);}
+function rndInt(a,b){return Math.floor(rnd(a,b+1));}
+function choice(arr){return arr[Math.floor(Math.random()*arr.length)];}
+function dist(ax,ay,bx,by){const dx=ax-bx,dy=ay-by;return Math.sqrt(dx*dx+dy*dy);}
+function key(x,y){return x+','+y;}
+function rr(c,x,y,w,h,r){
+  r=Math.min(r,w/2,h/2);
+  c.beginPath();
+  c.moveTo(x+r,y);
+  c.arcTo(x+w,y,x+w,y+h,r);
+  c.arcTo(x+w,y+h,x,y+h,r);
+  c.arcTo(x,y+h,x,y,r);
+  c.arcTo(x,y,x+w,y,r);
+  c.closePath();
+}
+function setFont(size, bold){ ctx.font=(bold?'bold ':'')+size+'px "Microsoft YaHei","PingFang SC",sans-serif'; }
+function wrapText(text, maxW){
+  const lines=[]; let cur='';
+  for(const ch of text){
+    const test=cur+ch;
+    if(ctx.measureText(test).width>maxW && cur!==''){ lines.push(cur); cur=ch; }
+    else cur=test;
+  }
+  if(cur!=='') lines.push(cur);
+  return lines;
+}
+
+/* ---------------- 全局状态 ---------------- */
+let state = null;
+const SAVE_KEY = 'pixel_island_save_v1';
+
+function defaultState(){
+  return {
+    px: 2*TILE, py: 38*TILE,   // 玩家农场：初始站在自家房屋上方草地（玩家屋占 tx=1..3, ty=39..41）
+    dir: 'down', moving:false,
+    stamina: 100, maxStamina:100,
+    day: 1, time: 8,            // 时间(小时)
+    weather: '晴',
+    weatherDays: 1, pendingWeather: '晴', pendingDays: 1,
+    lastTyphoonDay: -99, lastSnowDay: -99,
+    coin: 200,
+    houseLevel: 1,
+    unlockedPlotCount: 0,       // 已解锁的额外农田数
+    inv: { wheat_seed:3, carrot_seed:2, coin:0 }, // coin不在inv里存，单独字段
+    goodwill: { granny:0, carpenter:0, axi:0, xinxin:0, you:0, ling:0, yuan:0, zhishu:0, cui:0, tao:0, ale:0, wan:0 },
+    helpers: { ale:{active:false,t:0,cd:0,gatherCd:0}, wan:{active:false,t:0,cd:0,gatherCd:0} }, // 孩童陪伴采集状态（实时计时，不存档地图，但存档字段）
+    quests: {},                 // id -> {accepted, completed}
+    codex: {},                  // 已发现物品
+    sleeping:false, sleepTimer:0,
+    invExpanded:false,          // 背包是否展开显示全部
+    invOrder: [],               // 背包物品显示顺序（用于置顶排序）
+    gotAncientSeed:false,       // 许先生至交赠予的稀有古种子是否已领取（一次性）
+    endingClaimed:{},            // 各NPC至交专属馈赠是否已领取（按 id 记录）
+    relics:{},                   // 已发现遗迹点位 {id:true}，玩家抵达后标记，用于世界地图面板高亮
+    mainStoryUnlocked:false,     // 集齐全部10位NPC至交+支线后，玩家拼合“古农田遗迹真相”的全局结局是否已解锁
+    carpenterDiscount:false,     // 木伯“修复旧木盒”任务完成后解锁的房屋升级折扣
+    randomQuests:{},             // 随机委托系统：npcId -> {active: questId|null, done:{questId:true}}
+    randomGifts:{},              // 高好感一次性赠礼：npcId -> true 已领取
+  };
+}
+
+/* 地图运行数据（不存档，按种子重建；农田/好感/任务/背包/时间存档） */
+let map = null;
+
+/* ---------------- 地图生成 ---------------- */
+function buildMap(){
+  const m = {
+    blocked: new Set(),     // "tx,ty" 阻挡
+    road: new Set(),        // 路面
+    occupied: new Set(),    // 已占用(建筑/树/石/采集/农田/水)
+    plaza: new Set(),       // 中央广场瓷砖硬地（占用但不阻挡，不长草/不刷采集物）
+    water: new Set(),
+    buildings: [],
+    trees: [], rocks: [], resources: [], animals: [], npcs: [],
+    relics: [],             // 遗迹点位（2孩童 + 2山谷高级残片）
+    plots: [],              // 农田
+    plotSlots: [],          // 额外农田候选位
+  };
+
+  // 四条主路（均1格宽，按用户设计规划图）
+  // 上横向主路 y=19（分割北部片区与中部广场），避开右侧河流列 x>=MAP_W-1
+  for(let x=0;x<MAP_W-1;x++){ m.road.add(key(x,19)); }
+  // 下横向主路 y=31（分割中部广场与南部农村/月湖片区），避开右侧河流列 x>=MAP_W-1
+  for(let x=0;x<MAP_W-1;x++){ m.road.add(key(x,31)); }
+  // 主纵路 x=20：仅上半部 y=0..31（到下横路为止，不延伸到农村/月湖）
+  for(let y=0;y<=31;y++){ m.road.add(key(20,y)); }
+  // 副纵路 x=41：仅上半部 y=0..31（到下横路为止，不延伸到农村/月湖）
+  for(let y=0;y<=31;y++){ m.road.add(key(41,y)); }
+  // 主纵路 x=30：仅下半部 y=31..MAP_H-1（分割农村与月湖片区）
+  for(let y=31;y<MAP_H;y++){ m.road.add(key(30,y)); }
+
+  // 水域：右侧主河流 x=MAP_W-1..MAP_W-1 全高（最右一列）；月湖湖面 x=55..MAP_W-2, y=37..MAP_H-1
+  for(let y=2;y<MAP_H-1;y++){ m.water.add(key(MAP_W-1,y)); m.occupied.add(key(MAP_W-1,y)); m.blocked.add(key(MAP_W-1,y)); }
+  for(let x=55;x<MAP_W-1;x++){ for(let y=37;y<MAP_H-1;y++){ m.water.add(key(x,y)); m.occupied.add(key(x,y)); m.blocked.add(key(x,y)); } }
+  // 湖心小岛：在湖中央挖出 7×6 陆地 (x=60..66, y=42..47)，阿溪渔屋位于其上
+  for(let x=60;x<=66;x++){ for(let y=42;y<=47;y++){
+    const k=key(x,y); m.water.delete(k); m.occupied.delete(k); m.blocked.delete(k);
+  }}
+  // 通向湖心岛的步行道：从湖左侧岸边 (x=55, y=45) 水平直通小岛左侧 (x=60, y=45)，1格宽，穿越湖水
+  for(let x=55;x<=60;x++){
+    const k=key(x,45); m.water.delete(k); m.occupied.delete(k); m.blocked.delete(k);
+  }
+
+  function addBuilding(b){
+    b.label = b.label||'';
+    for(let x=b.tx;x<b.tx+b.tw;x++){ for(let y=b.ty;y<b.ty+b.th;y++){
+      m.blocked.add(key(x,y)); m.occupied.add(key(x,y));
+    }}
+    m.buildings.push(b);
+  }
+  // —— 八大区域建筑（按用户设计规划图 74×51 严格分区，mapName 用于世界地图面板）——
+  // 1) 石陶谷（西北：陶坊+石头采集地）
+  addBuilding({id:'tao',     tx:11, ty:11, tw:3, th:3, label:'陶叔的陶坊',    mapName:'陶叔陶坊',     roof:'#B5703C', wall:'#EFE2C4'});
+  // 2) 匠作坪（北中：木工作坊+林木采集地）
+  addBuilding({id:'carpenter',tx:31,ty:13, tw:3, th:3, label:'木伯的工坊',    mapName:'木工作坊',     roof:'#9FA86B', wall:'#EFE2C4'});
+  // 3) 木犀猎岭（东北：木犀山+猎屋山林区域）
+  addBuilding({id:'yuan',    tx:51, ty:13, tw:3, th:3, label:'阿远的木屋',    mapName:'猎屋',         roof:'#8A9A6B', wall:'#EFE2C4'});
+  // 4) 闲居坊（中西：村长家+酒馆）
+  addBuilding({id:'cui',     tx:1,  ty:23, tw:3, th:3, label:'翠姐的酒馆',    mapName:'酒馆',         roof:'#C96B8A', wall:'#F3E8CC'});
+  addBuilding({id:'granny',  tx:12, ty:24, tw:3, th:3, label:'游村长的家',    mapName:'村长家',       roof:'#C98B6B', wall:'#EFE2C4'});
+  // 5) 归耕农场（西南：玩家屋+农田+动物活动范围）
+  addBuilding({id:'player',  tx:1,  ty:39, tw:3, th:3, label:'我的家',        mapName:'玩家小屋',     roof:'#C98B6B', wall:'#F1E6C8'});
+  // 6) 通衢市井（中东：杂货铺+邮局）
+  addBuilding({id:'you',         tx:50, ty:24, tw:3, th:3, label:'许先生的杂货铺', mapName:'许先生的杂货铺', roof:'#D8A24B', wall:'#F3E8CC'});
+  addBuilding({id:'xinxin',      tx:59, ty:24, tw:3, th:3, label:'小信的邮局',    mapName:'小信的邮局',     roof:'#C96B9A', wall:'#EFE2C4'});
+  // 7) 星湖湾（东南：书塾+知书居所+露营地+阿溪渔屋+月湖水域）
+  addBuilding({id:'zhishuHouse', tx:37, ty:40, tw:3, th:3, label:'知书的居所',    mapName:'知书的居所',     roof:'#6B8FC9', wall:'#EFE2C4'});
+  addBuilding({id:'zhishu',      tx:41, ty:40, tw:3, th:3, label:'书塾',          mapName:'书塾',          roof:'#6B8FC9', wall:'#EFE2C4'});
+  addBuilding({id:'bbq',         tx:51, ty:33, tw:3, th:3, label:'露营地',       mapName:'露营地',        roof:'#C98B4B', wall:'#F3E8CC'});
+  addBuilding({id:'axi',     tx:62, ty:43, tw:3, th:3, label:'阿溪的渔屋',    mapName:'阿溪渔屋',     roof:'#6BA0C9', wall:'#EFE2C4'});
+
+  // 农田 + 动物围栏：放在野生资源 placeInRects 之后生成（详见末尾），避开野生树石/岩石占位
+
+  // NPC 定义（出生点置于建筑外侧草地；阿乐绑酒馆侧边、小晚绑知书居所侧；玲婆婆与翠姐同住酒馆）
+  const npcDefs=[
+    {id:'tao',     name:'陶叔',   tx:15, ty:14,  color:'#B5703C', role:'陶匠'},
+    {id:'carpenter',name:'木伯',  tx:35, ty:17,  color:'#9FA86B', role:'木匠'},
+    {id:'yuan',    name:'阿远',   tx:55, ty:17,  color:'#8A9A6B', role:'猎人'},
+    {id:'xinxin',  name:'小信',   tx:63, ty:27,  color:'#C96B9A', role:'邮差'},          // 邮局(59,24) 东侧门口
+    {id:'cui',     name:'翠姐',   tx:5,  ty:27,  color:'#C96B8A', role:'酒馆老板娘'},
+    {id:'ling',    name:'玲婆婆', tx:5,  ty:26,  color:'#B58BB0', role:'草药婆婆'},
+    {id:'granny',  name:'游村长', tx:16, ty:27,  color:'#C98B6B', role:'村长'},
+    {id:'you',     name:'许先生', tx:50, ty:28,  color:'#D8A24B', role:'杂货铺老板'},    // 杂货铺(50,24) 南侧外
+    {id:'zhishu',  name:'知书',   tx:40, ty:44,  color:'#6B8FC9', role:'私塾少年'},      // 书塾(41,40)与居所(37,40)之间
+    {id:'axi',     name:'阿溪',   tx:65, ty:44,  color:'#6BA0C9', role:'钓鱼爱好者'},   // 渔屋(62,43) 在湖心小岛上
+    {id:'ale',     name:'阿乐',   tx:4,  ty:26,  color:'#E0A85B', role:'翠姐的儿子', child:true, homeName:'翠姐酒馆旁'},
+    {id:'wan',     name:'小晚',   tx:30, ty:45,  color:'#B58BB0', role:'知书的妹妹', child:true, homeName:'知书居所旁'},  // 知书居所(27,43) 旁
+  ];
+  // 遗迹点位（4 处全部位于木犀山山地范围内）
+  m.relics = RELICS.map(r=>({id:r.id, name:r.name, tx:r.tx, ty:r.ty, kind:r.kind}));
+  for(const d of npcDefs){
+    m.npcs.push({id:d.id, name:d.name, x:d.tx*TILE, y:d.ty*TILE, color:d.color, role:d.role,
+      hx:d.tx*TILE, hy:d.ty*TILE, range:0.8, phase:rnd(0,6.28), speed:rnd(0.3,0.6),
+      child:!!d.child, homeTx:d.tx, homeTy:d.ty, homeName:d.homeName||''});
+  }
+
+  // —— R1 修复（QA P1 缺陷）：预留固定功能瓦片，freeTile 跳过 → 树石永不落入 ——
+  // NPC 出生 footprint（2x2 区域，仅占 occupied 不加 blocked，保可行走）
+  for(const n of npcDefs){
+    const cx=Math.floor(n.tx), cy=Math.floor(n.ty);
+    for(let dx=0;dx<2;dx++){ for(let dy=0;dy<2;dy++){
+      const tx=cx+dx, ty=cy+dy;
+      if(tx>=0&&ty>=0&&tx<MAP_W&&ty<MAP_H){ m.occupied.add(key(tx,ty)); }
+    }}
+  }
+  // 遗迹瓦片
+  for(const r of m.relics){ m.occupied.add(key(r.tx, r.ty)); }
+  // 孩童作息所有目标点位
+  for(const s of CHILD_SCHEDULE){
+    if(s.ale){ m.occupied.add(key(s.ale.tx, s.ale.ty)); }
+    if(s.wan){ m.occupied.add(key(s.wan.tx, s.wan.ty)); }
+  }
+
+  // 占用判定 + 随机布点
+  function freeTile(tx,ty){
+    if(tx<0||ty<0||tx>=MAP_W||ty>=MAP_H) return false;
+    const k=key(tx,ty);
+    return !m.blocked.has(k) && !m.road.has(k) && !m.occupied.has(k);
+  }
+  function placeInRects(rects, n, arr, block){
+    let tries=0;
+    while(n>0 && tries<5000){
+      tries++;
+      const R=choice(rects);
+      const tx=rndInt(R.x,R.x+R.w-1), ty=rndInt(R.y,R.y+R.h-1);
+      if(!freeTile(tx,ty)) continue;
+      m.occupied.add(key(tx,ty));
+      if(block) m.blocked.add(key(tx,ty));
+      arr.push({tx,ty,depleted:false}); n--;
+    }
+  }
+
+  // 中央广场：按用户设计规划图 — 主纵 x=20 东侧到副纵 x=41 西侧 (20×11=220 格)
+  // 仅占用(map.occupied)不阻挡(map.blocked) → 玩家可自由行走，freeTile 跳过 → 不长草、不刷树石/采集物
+  const PLZ = {x:21, y:20, w:20, h:11};
+  for(let x=PLZ.x; x<PLZ.x+PLZ.w; x++){ for(let y=PLZ.y; y<PLZ.y+PLZ.h; y++){
+    const k=key(x,y); m.plaza.add(k); m.occupied.add(k);
+  }}
+  m.plazaLabel = {cx: PLZ.x + (PLZ.w>>1), cy: PLZ.y + (PLZ.h>>1)};
+
+  // 各片区 wildRects（按用户设计规划图 74×51 八大区域划分）
+  // 石陶谷(NW) | 匠作坪(NC) | 木犀猎岭(NE,不可交互山地) | 闲居坊(MW) | 星湖湾(SE)
+  const wildRects=[
+    {x:1,  y:2,  w:18, h:16, kind:'stone'},   // 石陶谷：石头采集地
+    {x:21, y:2,  w:19, h:16, kind:'wood'},     // 匠作坪：林木采集地
+    {x:51, y:2,  w:9,  h:16, kind:'mountain'}, // 木犀猎岭：山地（不可交互，仅装饰）
+    {x:1,  y:21, w:18, h:9,  kind:'herb'},     // 闲居坊：草药采集
+    {x:31, y:33, w:41, h:17, kind:'gather'},   // 星湖湾：野花野菜蘑菇+月湖
+  ];
+
+  // 石陶谷：大量石头 + 少量树木 + 少量采集物
+  placeInRects([wildRects[0]], 22, m.rocks, true);
+  placeInRects([wildRects[0]], 4,  m.trees, true);
+  placeInRects([wildRects[0]], 6,  m.resources, false);
+  // 匠作坪：大量树木 + 中量石头 + 少量采集物
+  placeInRects([wildRects[1]], 25, m.trees, true);
+  placeInRects([wildRects[1]], 12, m.rocks, true);
+  placeInRects([wildRects[1]], 6,  m.resources, false);
+  // 木犀猎岭（不可交互装饰区）：少量树木+石头，不生成采集物
+  placeInRects([wildRects[2]], 8,  m.trees, true);
+  placeInRects([wildRects[2]], 5,  m.rocks, true);
+  // 闲居坊：少量树石 + 大量草药
+  placeInRects([wildRects[3]], 3, m.trees, true);
+  placeInRects([wildRects[3]], 3, m.rocks, true);
+  placeInRects([wildRects[3]], 16, m.resources, false);
+  // 星湖湾（含书塾/知书居所/露营地/阿溪/月湖+小岛）：少量树石 + 大量野花野菜蘑菇
+  placeInRects([wildRects[4]], 6, m.trees, true);
+  placeInRects([wildRects[4]], 4, m.rocks, true);
+  placeInRects([wildRects[4]], 22, m.resources, false);
+
+  // 采集物类型分配（按区域规则）
+  let ri=0;
+  const resTypes=['berry','fiber','mushroom','flower','herb'];
+  // 石陶谷（6）：杂
+  for(let i=0;i<6 && ri<m.resources.length;i++,ri++){ m.resources[ri].type=choice(resTypes); }
+  // 匠作坪(6)：杂
+  for(let i=0;i<6 && ri<m.resources.length;i++,ri++){ m.resources[ri].type=choice(resTypes); }
+  // 闲居坊（16）：优先草药
+  for(let i=0;i<16 && ri<m.resources.length;i++,ri++){ m.resources[ri].type = (i<10)? 'herb' : choice(resTypes); }
+  // 星湖湾（22）：野花+野菜+蘑菇密集
+  const gatherTypes=['mushroom','flower','herb','berry'];
+  for(let i=0;i<22 && ri<m.resources.length;i++,ri++){ m.resources[ri].type = (i<15)? choice(gatherTypes) : choice(resTypes); }
+
+  // 连片农田（按用户设计规划图：农村位于左下方，主纵 x=30 西侧）
+  // 玩家小屋 (1..3, 39..41) 从农田区域中排除；y=42 留空用于通行
+  // 区域A = 上段(1..11, 33..38) + 右侧(4..11, 39..41)；区域B (13..29, 33..41)
+  const farmRects=[
+    {x:1,  y:33, w:11, h:6},   // 区域A上段：玩家小屋上方
+    {x:4,  y:39, w:8,  h:3},   // 区域A右侧：玩家小屋右侧
+    {x:13, y:33, w:17, h:9},   // 区域B：y=33..41（y=42 留空通行）
+  ];
+  m.farmRects = farmRects;
+  const farmTiles=[];
+  for(const R of farmRects){ for(let y=R.y;y<R.y+R.h;y++) for(let x=R.x;x<R.x+R.w;x++){
+    // 跳过已被建筑/水域/道路/树石/岩石占据的瓦片（野生资源已生成，确保避开占位）
+    if(m.blocked.has(key(x,y)) || m.road.has(key(x,y)) || m.water.has(key(x,y))) continue;
+    farmTiles.push({tx:x,ty:y});
+  }}
+  // 初始10块连片农田（区域A 顶部行 x=1..10, y=33）
+  const initPlots=farmTiles.slice(0,10);
+  for(const p of initPlots){
+    m.plots.push({tx:p.tx, ty:p.ty, stage:'tilled', crop:null, watered:false});
+    m.occupied.add(key(p.tx,p.ty));
+  }
+  // 额外农田候选位（解锁用）：其余农场地块
+  m.plotSlots = farmTiles.slice(10);
+
+  // 动物围栏（视觉装饰 + 上方 3 格入口；按设计规划图位于农村下方，主纵 x=30 西侧）
+  // 范围 (1..29, 43..50)，左=地图左缘、右=主纵路 x=30-1
+  m.fence = new Set();
+  m.fenceRects = [{x:1,y:43,w:29,h:8}];
+  for(let y=44;y<=50;y++){ m.fence.add(key(1,y)); m.fence.add(key(29,y)); }   // 左/右两侧
+  for(let x=2;x<=28;x++) m.fence.add(key(x,50));                               // 下侧
+  for(let x=2;x<=6;x++) m.fence.add(key(x,43));                                // 上侧左段
+  for(let x=10;x<=28;x++) m.fence.add(key(x,43));                              // 上侧右段
+  // x=7..9, y=43 留 3 格上方入口
+
+  // 畜牧区/动物活动范围：紧贴农田下方 (1..28, 43..50)
+  const liveRect={x:1,y:43,w:28,h:8};
+  const animalDefs=[
+    {kind:'cow',  product:'milk',  color:'#F2E8D8', hide:'pelt'},
+    {kind:'sheep',product:'wool',  color:'#F0EAD8', hide:'pelt'},
+    {kind:'chicken',product:'egg', color:'#F6E7B0'},
+    {kind:'duck', product:'egg',   color:'#E8D8A0'},
+  ];
+  let at=0;
+  for(let i=0;i<animalDefs.length;i++){
+    let placed=false, t=0;
+    while(!placed && t<400){
+      t++;
+      const tx=rndInt(liveRect.x,liveRect.x+liveRect.w-1);
+      const ty=rndInt(liveRect.y,liveRect.y+liveRect.h-1);
+      if(!freeTile(tx,ty)) continue;
+      // 不与其它动物太近
+      let ok=true;
+      for(const a of m.animals){ if(dist(a.tx,a.ty,tx,ty)<2.2){ok=false;break;} }
+      if(!ok) continue;
+      m.occupied.add(key(tx,ty));
+      const a=animalDefs[i];
+      m.animals.push({tx,ty, hx:tx, hy:ty, kind:a.kind, product:a.product, color:a.color,
+        range:rnd(0.5,1.0), phase:rnd(0,6.28), speed:rnd(0.5,1.0)});
+      placed=true;
+    }
+  }
+
+  return m;
+}
+
+/* NPC 背景介绍（7档分层，随总好感实时累计解锁；索引=档位序号 0~6） */
+const NPC_BIO = {
+  granny:[
+    '游村长是村中最年长的长辈，也是自游小村的村长，常坐在村口晒着太阳，慈祥却少言。',
+    '她守着村子大半辈子，性子温和，眼底却总藏着一点说不清的心事。',
+    '年轻时她与丈夫一同开荒建村，谁料十年前一场山洪夺走了丈夫，她独自撑起整个村子。',
+    '灾后她挨家挨户劝说村民留下，四处奔走重建家园，村子才慢慢有了今天的模样。',
+    '她把这辈子都献给了村子，提起远去的丈夫时，眼里总有说不尽的温柔与遗憾。',
+    '年岁渐长，她常独自在田埂上出神，像是守着什么无人知晓的牵挂。',
+    '她对这片土地爱得深沉，却总把某些心事悄悄藏起，不愿轻易对人提起。',
+  ],
+  carpenter:[
+    '木伯是村里唯一的老木匠，手艺好脾气也硬，谁家缺个桌椅都找他。',
+    '他话不多，手上刨子却不停，木屑里藏着说不尽的往事。',
+    '早些年他曾在繁华城镇做工，见过大世面，后来不知为何回到这方水土归隐。',
+    '他屋里总摆着个半成品的小木马，谁问都不答，只说“留着吧”。',
+    '听说他年轻时在城里痛失年幼的孩子，才心灰意冷回到乡村，用木工活慢慢化解悲伤。',
+    '那木马是给早夭孩子做的，每提起，他便别过脸，不愿让人见泪。',
+    '他是个把思念都刻进木头里的老人，粗粝的手底下，藏着一个父亲最深的温柔。',
+  ],
+  axi:[
+    '阿溪是守在河边垂钓的少女，成天抱着鱼竿，钓上来的鱼比说的话还多。',
+    '她性子野，笑容却干净，谁家要鲜鱼都爱找她。',
+    '她说自己是“河里漂来的孩子”，被村里人捡回去养大，却从不细说身世。',
+    '她腕上总系着一枚温润玉佩，洗澡都不肯摘，说是“命里的东西”。',
+    '夜深时她会对着玉佩发呆，仿佛那玉里锁着谁来处的答案。',
+    '她总盼着有一天能弄清自己究竟从哪来，可又怕答案会让自己失去这个家。',
+    '她是把心事都抛进河里的姑娘，水波荡开，便又是一张干净的笑颜。',
+  ],
+  xinxin:[
+    '小信是走街串巷的邮差，背着鼓囊囊的邮包，脚步比谁都快。',
+    '他见多识广，镇上村头谁家的事，他总能说上两句。',
+    '自小没个家的他，靠两条腿替人送信，走南闯北见了不少世面。',
+    '他嘴上爱玩笑，眼里却藏着漂泊人特有的清醒与孤独。',
+    '十年前山洪那年他路过此地，被村民互相扶持的温情打动，索性留了下来。',
+    '他害怕扎根之后再面对离别，所以总把归属感藏在玩笑背后。',
+    '他是个把思念都装进邮包的人，天南地北地跑，心却渐渐系在了这村子。',
+  ],
+  you:[
+    '许先生是外乡来的杂货商人，铺子不大，货却稀奇，常惹人好奇。',
+    '他谈吐斯文，笑里藏话，没人知道他究竟从哪座城来。',
+    '他箱底压着本残破古籍，说是先辈游历见闻，话里偶尔漏出些遥远的故事。',
+    '他看人的眼神很特别，像在对照什么旧物，却又不动声色。',
+    '他常念叨远方的故土，说背井离乡多年，只想安稳过日子。',
+    '他待人温和有礼，村里人都把他当普通的外乡生意人，与他相处自在。',
+    '他是个谜一样的过客，温和的外表下，似乎还藏着不为人知的心事。',
+  ],
+  // 新 NPC：同样 7 档分层背景（全部按新世界观重写，去除任何遗迹真相泄露）
+  ling:[
+    '玲婆婆住在村子西侧的草药小屋，懂得许多草药知识，平日熬制药剂，也收购村民采来的草药。',
+    '她性子温和，却总望着北边的林子出神，像在等什么人回来。',
+    '年轻时她曾随游医走南闯北，识得不少偏方，如今守着小屋，安稳度日。',
+    '她的老伴早年去世，她便独自守着这间药草屋，与药香为伴。',
+    '她说起老伴时总是轻轻带过，却把他的旧物擦得锃亮，藏在角落。',
+    '行医一生，她最欣慰的便是能护住全村人的身子骨，看大家平安。',
+    '她把半生故事都熬进了汤药里，外人只当她是慈祥的草药婆婆。',
+  ],
+  yuan:[
+    '阿远是北边林间的年轻猎人，性情耿直，擅长设陷阱与狩猎，也收售兽皮。',
+    '他独自照看林子的安宁，常与野兽周旋，话不多却可靠。',
+    '他习惯山林独居，村人难得见他几回，却都放心把外围的野兽威胁交给他。',
+    '他总在林深处徘徊，像在找什么丢失已久的东西。',
+    '他厌倦人群纷争，偏爱山野的自由，说只有在林子里才睡得安稳。',
+    '他守着林子，也守着村子外围的安宁，是个寡言却顶用的年轻人。',
+    '他把自己的世界留在了山林，外人只当他是个性格沉默的猎人。',
+  ],
+  zhishu:[
+    '知书是村中私塾的少年，聪慧好学，痴迷古籍与村中旧事。',
+    '他总抱着书卷，连钓鱼的阿溪都常被他拉去听典故。',
+    '他看透了官场的蝇营狗苟，索性放弃功名，回到家乡整理乡土故事。',
+    '他偷偷抄录了不少残破古书，盼望有人帮他把散页补全。',
+    '他看人的眼神认真，似在对照书里某个模糊的名字。',
+    '他最大的心愿，是把村子的故事留存下来，不让它随老人们一同老去。',
+    '他是个把理想都写在书页里的少年，安静却执拗地守着村子的记忆。',
+  ],
+  cui:[
+    '翠姐在十字路口经营着酒馆，爽朗能干，亲手烹制招牌料理，也收售渔获与作物。',
+    '她见多识广，村中谁的喜好她都门儿清，常热心替人牵线。',
+    '她的酒馆是消息集散地，三教九流的故事都能在这儿听见。',
+    '她的丈夫常年在外经商，她便守着酒馆，把一村人的烟火气撑了起来。',
+    '她看似八面玲珑，实则最重情义，谁有难处她都搭把手。',
+    '守着酒馆这些年，她把全村人的悲欢都收进了心里，却从不轻易示弱。',
+    '她说，只要酒馆的灯还亮着，这村子就还是个家。',
+  ],
+  // 老陶（陶匠）——第10位NPC，原游戏未收录，按需求文档新增
+  tao:[
+    '老陶是村里的陶匠，一辈子与陶土窑火相伴，村中碗罐多半出自他手。',
+    '他性子沉静，手指粗粝却灵巧，捏起的泥坯总带着几分温柔。',
+    '早些年他疼爱的女儿还在，窑房里总是热闹，后来一场变故带走她，他才越发沉默。',
+    '他至今守着那座旧窑，仿佛只要窑火不熄，女儿便还在身边。',
+    '提起女儿，他眼圈会红，却总笑着说“都过去了”，把思念埋进陶土里。',
+    '日子久了，他把自己活成了村子的一部分，默默烧陶，安静度日。',
+    '他是个把心事都揉进泥里、烧进窑里的老人，外人难窥他心底的那道旧伤。',
+  ],
+  // 孩童 NPC（年轻一辈，对古遗迹毫不知情，仅记录天真日常与玩耍地点）
+  ale:[
+    '翠姐酒馆里跑来跑去的小淘气，今年才五岁，最爱缠着村里人听新鲜事。',
+    '他记性不大好，却能把大人们闲聊的趣事复述得活灵活现。',
+    '在酒馆长大的孩子，天天听村民闲谈。他只记住大人随口提过的几处奇怪土坑、碎陶片出现的地点，全当好玩的玩耍地。',
+    '他拉着你的衣角，非要带你去“秘密基地”——村边那片他常去玩的土坑。',
+    '他说长大要当走南闯北的邮差，像小信哥哥一样带回来稀奇玩意儿。',
+    '夜深时他会悄悄说，其实有点怕黑，希望有人一直陪着他玩。',
+    '他把自己最常去的那片土坑指给你看，只当是好玩的地方，不懂那底下藏着什么。',
+  ],
+  wan:[
+    '知书身边的小尾巴，六岁的她自幼父母早逝，全靠哥哥一手带大。',
+    '她总安安静静跟在知书身后，哥哥整理旧书卷时，她就在草地里玩。',
+    '常跟着哥哥在山野散步，曾在山坡草丛瞧见埋在土里露出一角的旧石块，只当是块奇特的石头。',
+    '她把那块怪石头的事藏在心里，没告诉哥哥，怕被说乱捡东西。',
+    '她说最喜欢哥哥讲的书里小故事，做梦都想走出村子看一看。',
+    '哥哥读书时，她会偷偷把采来的野花插在书页间，盼着哥哥夸她。',
+    '她指给你看山坡上那块露出角的怪石头，只当是自己的小秘密，不明白它意味着什么。',
+  ],
+};
+// 商店（buy=玩家向NPC买，sell=玩家卖给NPC；buy 好感解锁项见 shopBuyList 追加）
+const NPC_SHOP = {
+  // 许先生【杂货商店】：种子农具 + 收购作物/采集物；高级种子按好感解锁（shopBuyList）
+  you:{ buy:[ {item:'wheat_seed', price:20, name:'小麦种子'}, {item:'carrot_seed',price:30, name:'胡萝卜种子'}, {item:'tomato_seed',price:40, name:'番茄种子'} ],
+        sell:[ {item:'wheat',price:15,name:'小麦'},{item:'carrot',price:18,name:'胡萝卜'},{item:'tomato',price:22,name:'番茄'},{item:'flower',price:8,name:'野花'},{item:'berry',price:10,name:'浆果'} ] },
+  // 阿溪【渔具商店】：售卖鱼竿鱼饵 + 收购鱼类
+  axi:{ buy:[ {item:'rod', price:80, name:'鱼竿'}, {item:'bait',price:15, name:'鱼饵'} ],
+        sell:[ {item:'fish_carp',price:18,name:'鲤鱼'},{item:'fish_bass',price:18,name:'鲈鱼'},{item:'shrimp',price:14,name:'河虾'} ] },
+  // 小信【交易商店】：售卖小镇特殊物资（已移除料理售卖，料理改由翠姐酒馆供应）
+  xinxin:{ buy:[ {item:'mystery_seed', price:90, name:'神秘种子'}, {item:'trinket', price:45, name:'旅人遗物'}, {item:'page', price:40, name:'古籍残页'} ] },
+  // 玲婆婆【草药变卖】：仅收购玩家背包特殊草药，不出售任何物品
+  ling:{ sell:[ {item:'herb', price:12, name:'草药'}, {item:'iceflower', price:14, name:'冰花'} ] },
+  // 阿远【物资交换】：野外材料兑换稀有道具；更多交换品按好感解锁（shopBuyList）
+  yuan:{ buy:[ {item:'trap', price:70, name:'捕兽夹'} ], sell:[ {item:'pelt', price:25, name:'兽皮'} ] },
+  // 翠姐【酒馆】：售卖各类料理（存入背包可食用）；好感越高解锁更多高级料理（shopBuyList）
+  cui:{ buy:[ {item:'dish', price:40, name:'料理'}, {item:'bread', price:25, name:'麦饼'} ],
+        sell:[ {item:'fish_carp',price:18,name:'鲤鱼'},{item:'fish_bass',price:18,name:'鲈鱼'},{item:'shrimp',price:14,name:'河虾'},{item:'wheat',price:15,name:'小麦'},{item:'carrot',price:18,name:'胡萝卜'},{item:'tomato',price:22,name:'番茄'} ] },
+  zhishu:{},
+  tao:{ sell:[ {item:'pottery', price:20, name:'古陶碎片'} ] },
+};
+// 礼物喜好/厌恶（影响好感增减）
+const NPC_GIFT = {
+  granny:{like:['flower','berry'], dislike:['stone','wood']},
+  carpenter:{like:['wood','stone'], dislike:['flower']},
+  axi:{like:['bait','rod','fish_carp'], dislike:['stone']},
+  xinxin:{like:['berry','flower'], dislike:['wood']},
+  you:{like:['wheat','carrot','tomato'], dislike:['pelt']},
+  ling:{like:['herb','flower','berry'], dislike:['stone','wood']},
+  yuan:{like:['pelt','trap'], dislike:['flower','dish']},
+  zhishu:{like:['rare_seed','mystery_seed','flower'], dislike:['pelt','stone']},
+  cui:{like:['fish_carp','fish_bass','dish','tomato'], dislike:['herb']},
+  tao:{like:['stone','flower','pottery'], dislike:['pelt','wood']},
+  ale:{like:['berry','flower','fish_carp'], dislike:['stone','wood']},
+  wan:{like:['flower','berry','dish'], dislike:['stone','pelt']},
+};
+// 差异化台词（按天气）——全部10位NPC，符合新世界观，不泄露许先生真实目的与遗迹全貌
+const NPC_QUOTES = {
+  granny:{晴:['村子的事，总也忙不完。','今天天气好，多走走也好。'], 雨:['下雨天，路滑，少往外跑。'], 雪:['下雪了，屋里暖和，进来坐坐。'], 灾:['这样的天，待在家里最稳妥。'], default:['有什么事，尽管来找我。']},
+  carpenter:{晴:['今日手头活儿不少。','木料干爽，正适合打磨。'], 雨:['雨天湿气重，木头易变形。'], 雪:['雪天不出工，正好歇歇。'], 灾:['风太大，今天不干活了。'], default:['要修要补，随时找我。']},
+  axi:{晴:['今天鱼情不错，要不要来一根竿？','河风舒服，钓一会儿吧。'], 雨:['雨天鱼爱浮头，最好钓了。'], 雪:['雪天河面冷，我就在棚里守着。'], 灾:['这种天，还是岸上安全。'], default:['河里的事，我比谁都熟。']},
+  xinxin:{晴:['今天信多，得跑好几趟。','外头的消息，要听听吗？'], 雨:['雨天路滑，送信也慢些。'], 雪:['雪天路难走，我认得近道。'], 灾:['这种天，信晚点到，莫怪我。'], default:['有信要寄，找我就行。']},
+  you:{晴:['今日新到了些种子，来看看？','天气好，正适合打理铺子。'], 雨:['雨天生意淡，正好翻翻旧书。'], 雪:['下雪天，炉子边最舒服。'], 灾:['外头不便，进来避避。'], default:['远道而来，承蒙关照。']},
+  ling:{晴:['今日草药长势正好。','天气不错，去采些草药吧。'], 雨:['下雨天草药更鲜灵。'], 雪:['下雪了，我就在屋里熬药。'], 灾:['这样的天气，还是屋里安全。'], default:['若是身子乏了，来找我拿药剂。']},
+  yuan:{晴:['林子里今天安静些。','要走走吗？我带你认认猎径。'], 雨:['雨天野兽都躲起来了。'], 雪:['雪天路滑，少往林子深处去。'], 灾:['风太大，今天不出猎。'], default:['有事去林间木屋找我。']},
+  zhishu:{晴:['光好，正适合抄书。','村史里可有不少有趣的事。'], 雨:['雨天宜读书。'], 雪:['雪天安静，正好校书。'], 灾:['这种天，还是在屋里翻书稳妥。'], default:['那些残页，你若感兴趣我讲与你听。']},
+  cui:{晴:['今天酒馆热闹着呢。','来尝尝我的拿手菜？'], 雨:['雨天配热汤最妙。'], 雪:['下雪天，热酒最暖身。'], 灾:['外头风大，进屋喝杯再走。'], default:['坐坐？村里的消息我都知道。']},
+  tao:{晴:['今日窑火正旺，泥坯好塑。','天好，正好晾坯。'], 雨:['雨天泥软，正适合揉泥。'], 雪:['雪天冷，窑里暖，进来歇歇。'], 灾:['这种天，守着窑火便好。'], default:['要碗罐陶器，找老陶我。']},
+};
+const QUESTS = {
+  g1:{npc:'granny',   name:'修缮木桥',   desc:'收集 5 个木头交给游村长', req:{wood:5}, reward:{coins:40, unlockPlots:3}},
+  m1:{npc:'carpenter',name:'石料补给',   desc:'收集 3 个石头交给木伯',   req:{stone:3}, reward:{coins:30}},
+  a1:{npc:'axi',      name:'鲜鱼馈赠',   desc:'钓 2 条鲤鱼送给阿溪',     req:{fish_carp:2}, reward:{coins:35, bait:2}},
+  x1:{npc:'xinxin',   name:'莓果信使',   desc:'收集 3 个浆果交给小信',   req:{berry:3}, reward:{coins:25}},
+  y1:{npc:'you',      name:'麦香订单',   desc:'交付 5 个小麦给许先生',   req:{wheat:5}, reward:{coins:50, tomato_seed:2}},
+};
+// ============ 随机委托任务系统（11 位 NPC 全量） ============
+// 规则：每 NPC 独立任务池；任务完成后从池剔除不再刷出；解锁受好感档位门槛 minTier
+//（FAVOR_TIERS 索引：0陌生 1熟识 2友好 3亲近 4投缘 5知己 6至交）；
+// 每 NPC 同时最多 1 个进行中委托，未完成不会被刷新覆盖。
+const RANDOM_QUESTS = {
+  granny:[
+    {id:'rg1', name:'村子木料告急', desc:'收集 6 个木头', req:{wood:6}, reward:{coins:70}, minTier:2},
+    {id:'rg2', name:'修补祠堂台阶', desc:'收集 8 个石头', req:{stone:8}, reward:{coins:90}, minTier:3},
+    {id:'rg3', name:'为纪念石寻花', desc:'收集 6 朵野花', req:{flower:6}, reward:{coins:80, items:{fertilizer:1}}, minTier:4},
+    {id:'rg4', name:'村庄药材储备', desc:'收集 5 株草药', req:{herb:5}, reward:{coins:110}, minTier:4},
+  ],
+  carpenter:[
+    {id:'rc1', name:'伐木场备料', desc:'收集 8 个木头', req:{wood:8}, reward:{coins:85}, minTier:2},
+    {id:'rc2', name:'采石供应', desc:'收集 10 个石头', req:{stone:10}, reward:{coins:105}, minTier:3},
+    {id:'rc3', name:'高级建材筹备', desc:'收集 1 份高级建材', req:{mat_adv:1}, reward:{coins:160, items:{rare_seed:1}}, minTier:5},
+  ],
+  axi:[
+    {id:'ra1', name:'河鲜订单', desc:'钓 3 条鲤鱼', req:{fish_carp:3}, reward:{coins:85, items:{bait:2}}, minTier:2},
+    {id:'ra2', name:'酒馆要鲈鱼', desc:'钓 3 条鲈鱼', req:{fish_bass:3}, reward:{coins:85}, minTier:3},
+    {id:'ra3', name:'河虾大丰收', desc:'收集 4 只河虾', req:{shrimp:4}, reward:{coins:80}, minTier:3},
+  ],
+  xinxin:[
+    {id:'rx1', name:'代购浆果', desc:'送 4 个浆果给翠姐（交给小信即可）', req:{berry:4}, reward:{coins:70}, minTier:2},
+    {id:'rx2', name:'山野信物', desc:'收集 3 个松果作为信物', req:{pinecone:3}, reward:{coins:75}, minTier:3},
+    {id:'rx3', name:'旅人遗失物', desc:'找回 3 件旅人遗物', req:{trinket:3}, reward:{coins:130, items:{mystery_seed:1}}, minTier:4},
+  ],
+  you:[
+    {id:'ry1', name:'麦仓补货', desc:'交付 8 个小麦', req:{wheat:8}, reward:{coins:100, items:{wheat_seed:3}}, minTier:2},
+    {id:'ry2', name:'胡萝卜订单', desc:'交付 6 个胡萝卜', req:{carrot:6}, reward:{coins:95}, minTier:3},
+    {id:'ry3', name:'番茄应季', desc:'交付 5 个番茄', req:{tomato:5}, reward:{coins:110}, minTier:4},
+    {id:'ry4', name:'野花装点铺子', desc:'收集 6 朵野花', req:{flower:6}, reward:{coins:70}, minTier:2},
+  ],
+  cui:[
+    {id:'cq1', name:'蘑菇汤备料', desc:'收集 5 个蘑菇', req:{mushroom:5}, reward:{coins:75, items:{dish:1}}, minTier:2},
+    {id:'cq2', name:'酒馆土豆存量', desc:'收集 5 个土豆', req:{potato:5}, reward:{coins:90}, minTier:3},
+    {id:'cq3', name:'供酒馆的鲜鱼', desc:'钓 3 条鲈鱼', req:{fish_bass:3}, reward:{coins:85}, minTier:4},
+  ],
+  ling:[
+    {id:'rl1', name:'药柜缺草药', desc:'收集 6 株草药', req:{herb:6}, reward:{coins:80}, minTier:2},
+    {id:'rl2', name:'冬日药材', desc:'收集 3 朵冰花', req:{iceflower:3}, reward:{coins:90, items:{potion:1}}, minTier:4},
+    {id:'rl3', name:'晾晒野菜', desc:'收集 5 个蘑菇', req:{mushroom:5}, reward:{coins:75}, minTier:3},
+  ],
+  ale:[
+    {id:'al1', name:'给妈妈摘花', desc:'收集 4 朵野花', req:{flower:4}, reward:{coins:50, items:{berry:2}}, minTier:2},
+    {id:'al2', name:'找丢失的木偶', desc:'收集 2 个松果（当玩具）', req:{pinecone:2}, reward:{coins:60}, minTier:3},
+    {id:'al3', name:'采些甜浆果', desc:'收集 4 个浆果', req:{berry:4}, reward:{coins:55}, minTier:2},
+  ],
+  zhishu:[
+    {id:'zs1', name:'补全残页', desc:'收集 2 份古籍残页', req:{page:2}, reward:{coins:140, items:{rare_seed:1}}, minTier:4},
+    {id:'zs2', name:'古陶标本', desc:'收集 2 片古陶碎片', req:{pottery:2}, reward:{coins:150}, minTier:5},
+    {id:'zs3', name:'河底遗物入档', desc:'收集 2 件河底遗物', req:{relic:2}, reward:{coins:160, items:{fertilizer:2}}, minTier:5},
+    {id:'zs4', name:'藤蔓书签材料', desc:'收集 6 根藤蔓', req:{vine:6}, reward:{coins:90}, minTier:3},
+  ],
+  wan:[
+    {id:'wn1', name:'捉萤火虫', desc:'收集 3 个蘑菇（夜色小物）', req:{mushroom:3}, reward:{coins:55}, minTier:2},
+    {id:'wn2', name:'冰花送姐姐', desc:'收集 3 朵冰花', req:{iceflower:3}, reward:{coins:70, items:{flower:2}}, minTier:3},
+    {id:'wn3', name:'捡漂亮石子', desc:'收集 3 个松果', req:{pinecone:3}, reward:{coins:60}, minTier:2},
+  ],
+  yuan:[
+    {id:'yu1', name:'兽皮储备', desc:'收集 3 张兽皮', req:{pelt:3}, reward:{coins:120}, minTier:3},
+    {id:'yu2', name:'林间松果', desc:'收集 5 个松果', req:{pinecone:5}, reward:{coins:85}, minTier:2},
+    {id:'yu3', name:'采集树脂', desc:'收集 3 份树脂', req:{resin:3}, reward:{coins:100}, minTier:4},
+    {id:'yu4', name:'深林藤蔓', desc:'收集 8 根藤蔓', req:{vine:8}, reward:{coins:110, items:{trap:1}}, minTier:4},
+  ],
+};
+// 料理类物品：不可作为礼物赠送（全局规则）
+const GIFT_BLOCKED = {dish:true, fish_soup:true, bread:true, stew:true};
+// 三段个人剧情任务链（全部10位NPC）
+// 解锁规则（硬性）：tierReq 对应档位索引
+//   阶段一：友好(300)  tierReq=2  → 解锁浅层往事 + 阶段一任务；完成阶段一才解锁投缘中层
+//   阶段二：投缘(600)  tierReq=4  → 解锁中层过往 + 阶段二任务；完成阶段二才解锁知己
+//   阶段三（铺垫）：知己(750) tierReq=5 → 解锁铺垫任务；完成铺垫任务才开放至交(999)上限 + 终极秘辛
+// 顺序解锁：必须完成上一段才出现下一段（renderChainQuests 内 enforce）
+// scene: 特殊触发类任务（无物品交付，靠场景/交谈推进）—— rain_night=雨夜找阿溪 | edge=村外边缘 | deliver=分送NPC | interview=打听NPC
+const NPC_CHAINS = {
+  granny:[
+    {name:'村子的纪念', desc:'游村长想为初代村民立纪念石，需收集 石头×15、野花×8。', req:{stone:15, flower:8}, tierReq:2, reward:{coins:350, favor:120, plots:2}},
+    {name:'修补旧土路', desc:'村子西侧古土路破损，需 木材×20、石头×25 修缮。', req:{wood:20, stone:25}, tierReq:4, reward:{coins:600, favor:130, plots:2}},
+    {name:'遗迹的痕迹', desc:'采集散落的古陶碎片×6（野外采集点搜寻）。', req:{pottery:6}, tierReq:5, reward:{coins:800, favor:150, items:{rare_seed:2}}},
+  ],
+  carpenter:[
+    {name:'破损木栅栏', desc:'村子外围栅栏腐朽，木伯体力不足，需 木材×22。', req:{wood:22}, tierReq:2, reward:{coins:400, favor:120}},
+    {name:'修复旧木盒', desc:'木伯的残破旧木盒需 木材×12、树脂×5 修补。', req:{wood:12, resin:5}, tierReq:4, reward:{coins:700, favor:130, discount:true}},
+    {name:'寻找丢失的凿子', desc:'木伯的祖传老凿子遗失在树林，去野外搜寻找回 老凿子×1。', req:{chisel:1}, tierReq:5, reward:{coins:900, favor:150, items:{mat_adv:1}}},
+  ],
+  axi:[
+    {name:'修补渔具', desc:'阿溪的渔网破损，需 藤蔓×10、木材×8。', req:{vine:10, wood:8}, tierReq:2, reward:{coins:300, favor:120, items:{rod:1}}},
+    {name:'打捞河底旧物', desc:'陪阿溪在河边垂钓，钓取 河底遗物×4。', req:{relic:4}, tierReq:4, reward:{coins:550, favor:130, items:{bait:3}}},
+    {name:'雨夜河畔守候', desc:'雨天夜晚前往河边找到阿溪，触发场景事件（无需交付物品）。', req:{}, tierReq:5, scene:'rain_night', reward:{coins:750, favor:150, items:{bait:5}}},
+  ],
+  xinxin:[
+    {name:'送达信件', desc:'帮小信把3封信件分别递交给 游村长、木伯、许先生。', req:{}, tierReq:2, scene:'deliver', targets:['granny','carpenter','you'], reward:{coins:420, favor:120, items:{mystery_seed:1}}},
+    {name:'收集旅人遗失物件', desc:'野外搜集旅人遗失的小物件×7。', req:{trinket:7}, tierReq:4, reward:{coins:650, favor:130, items:{mystery_seed:1}}},
+    {name:'跨村送信', desc:'跑到地图村外边缘，投递一封重要信件（无需交付物品）。', req:{}, tierReq:5, scene:'edge', reward:{coins:850, favor:150}},
+  ],
+  you:[
+    {name:'收集乡土作物', desc:'交付本地作物：土豆×10、胡萝卜×10。', req:{potato:10, carrot:10}, tierReq:2, reward:{coins:450, favor:120, items:{wheat_seed:2, carrot_seed:2, tomato_seed:2}}},
+    {name:'寻访旧传闻', desc:'分别和 游村长、木伯 对话打听古老传闻，返回交付许先生。', req:{}, tierReq:4, scene:'interview', targets:['granny','carpenter'], reward:{coins:720, favor:130, items:{fertilizer:2}}},
+    {name:'整理古籍残页', desc:'野外搜集散落古籍残页×5。', req:{page:5}, tierReq:5, reward:{coins:950, favor:150}},
+  ],
+  // 新 NPC：同样三段链，档位对齐（友好/投缘/知己）
+  ling:[
+    {name:'寻药篓',   desc:'交付 3 个草药给玲婆婆',   req:{herb:3},  tierReq:2, reward:{coins:30, favor:120, items:{potion:1}}},
+    {name:'收集草药', desc:'交付 8 个草药给玲婆婆',   req:{herb:8},  tierReq:4, reward:{coins:55, favor:130}},
+    {name:'祭拜老伴', desc:'交付 1 鲜花 + 2 草药给玲婆婆', req:{flower:1,herb:2}, tierReq:5, reward:{coins:90, favor:150, items:{potion:2}}},
+  ],
+  yuan:[
+    {name:'驱兽',     desc:'交付 1 个捕兽夹给阿远',   req:{trap:1},  tierReq:2, reward:{coins:35, favor:120}},
+    {name:'收集皮毛', desc:'交付 4 张兽皮给阿远',     req:{pelt:4},  tierReq:4, reward:{coins:60, favor:130}},
+    {name:'寻找旧遗物',desc:'交付 1 个稀有种子给阿远', req:{rare_seed:1}, tierReq:5, reward:{coins:100, favor:150, items:{trap:2}}},
+  ],
+  zhishu:[
+    {name:'古籍残页', desc:'交付 2 个纤维给知书',     req:{fiber:2}, tierReq:2, reward:{coins:30, favor:120}},
+    {name:'收集抄写材料', desc:'交付 3 个鲜花给知书',     req:{flower:3}, tierReq:4, reward:{coins:55, favor:130}},
+    {name:'村落秘史', desc:'交付 5 个蘑菇给知书',     req:{mushroom:5}, tierReq:5, reward:{coins:80, favor:150, items:{rare_seed:2}}},
+  ],
+  cui:[
+    {name:'收集食材', desc:'交付 3 个小麦给翠姐',     req:{wheat:3}, tierReq:2, reward:{coins:35, favor:120}},
+    {name:'修补酒馆', desc:'交付 5 个木头给翠姐',     req:{wood:5},  tierReq:4, reward:{coins:60, favor:130}},
+    {name:'传递消息', desc:'交付 2 个料理给翠姐',     req:{dish:2},  tierReq:5, reward:{coins:90, favor:150, items:{potion:1}}},
+  ],
+  // 老陶（陶匠）——三段链，档位对齐（友好/投缘/知己）
+  tao:[
+    {name:'采集陶土',   desc:'老陶的窑房年久失修，需 石头×10、木材×8 帮他重砌。', req:{stone:10, wood:8}, tierReq:2, reward:{coins:400, favor:120}},
+    {name:'烧制储存陶罐', desc:'帮他收集古陶碎片×5，重新烧制失传纹样。', req:{pottery:5}, tierReq:4, reward:{coins:700, favor:130, items:{fertilizer:1}}},
+    {name:'修复女儿旧陶杯',desc:'野外搜寻散落的古陶残片×6（采集/凿石点）。', req:{pottery:6}, tierReq:5, reward:{coins:950, favor:150, items:{rare_seed:1}}},
+  ],
+};
+// 送礼偏好提示是否解锁（翠姐高好感：投缘及以上）
+function giftHintsUnlocked(){ return favorInfo(state.goodwill['cui']||0).idx >= 4; } // 投缘及以上
+
+// NPC 剧情秘辛（全部10位NPC）：按好感+任务完成进度，分段解锁对应对话与终极秘辛
+// 字段：base 基础简介｜shallow 浅层往事(友好)｜s1done 阶段一完成对话｜mid 中层过往(投缘+阶段一)｜
+//       s2done 阶段二完成对话｜foreshadow 铺垫对话(知己)｜ultimate 终极秘辛(至交，仅交一块碎片化线索)｜roster 名册秘辛展示｜ending 结局｜reward 专属馈赠
+// 世界观硬约束：①每位NPC至交只交出自己那一块碎片化线索，绝无完整遗迹真相；②许先生全程伪装，真实动机仅在「集齐全部10位至交」的全局结局揭晓；③年轻一辈(阿溪/小信/阿远/知书)对古遗迹毫不知情。
+const NPC_SECRET = {
+  granny:{
+    base:'自游小村的村长，管理着村里的大小事务，为人和善，常在小村周围巡视。可以找她扩建土地。人物底色：丈夫在山洪中离世，她独自撑起村落，一生守护着脚下的土地与村民。',
+    shallow:'一晃许多年过去了，我大半辈子都守在这片土地上。刚来那时，到处荒草乱石，连像样的田地都没有。我和丈夫一同开荒，可惜他没能看见村子如今的模样——十年前那场山洪，把他永远留在了河里。',
+    s1done:'谢谢你帮村子立起这块纪念石。那些最早一批开荒的人，值得被记住。早些年村里苦，好多人想走。',
+    mid:'丈夫走后，不少村民也慌了神，打包行李想投奔外头城镇。我舍不得这片血汗开垦的家园，挨家挨户劝，四处奔走凑物资，才勉强把大家留住。这些年村子慢慢好起来，可我心里总悬着：年轻人越来越向往外面，这村子将来会去往何处？',
+    s2done:'这条路，是最早村民亲手铺的。修好它，就像守住了从前的记忆。有些事，我还没法同你说。',
+    foreshadow:'（压低声音）这些年，我常在田里翻出些说不清来历的旧陶片……我悄悄收着，心里隐隐猜，这地方古时候，或许有人住过。可没凭没据，我不敢声张，怕引来外人，毁了村子的安宁。',
+    ultimate:'你一次次帮村子，我信你。这些，是我这些年收着的陶土残片——都是翻地时刨出来的，我没敢声张。我只当是个人猜想：这片土地下，也许埋着很老很老的人家。可究竟是什么人家、什么年月，我一概不知，也从没告诉过别人。你拿着吧，就当我的一份念想。',
+    roster:'丈夫死于山洪，她独自留守建设村落。田地间偶翻出旧陶片，她悄悄收起，心里猜测古时有人居住，却无证据不敢声张。她把这份说不清的疑惑，连同几枚陶土残片，交给了你。',
+    ending:'她把多年收集的陶土残片郑重交到你手里，眼里却轻松了些：总算有人替我看顾这些说不清来历的物件了。村口的晒谷场上，她的背影依旧笔直。',
+    reward:{items:{potion:2}, coins:50},
+  },
+  carpenter:{
+    base:'村里唯一的木匠，可以找他升级房屋和建筑。人物底色：曾在大城做工，痛失幼子后归隐乡村，把思念都刻进了木头里。',
+    shallow:'我年轻时在繁华城镇做工，找我做活的人络绎不绝。旁人羡慕我的手艺，可那繁华喧嚣，填不满心里的缺口。有些往事，我不愿轻易提。',
+    s1done:'木头不会说话，你用心打磨，它便回你以温润。许多心事，我都在敲敲打打里慢慢化了。',
+    mid:'我曾有个年幼的孩子，一场重病夺走了他。城里再好的医术也没留住。巨大的悲痛压垮了我，我放弃生意，逃回这安静的小村。握着刨子打磨木料时，心里的疼才稍平些。',
+    s2done:'这盒子装着我过去的念想。有些伤，时间也抹不平，只能学着与它共存。',
+    foreshadow:'（望着窗外的旧梁）十年前山洪冲毁村里老屋，我修缮时，从地基里挖出一块质地古怪的木料构件——那纹路、那卯榫，绝不是当代手艺。我只当是古时候不知谁家的旧物，心里犯疑，却没深究，更没与人说。',
+    ultimate:'我信你，才敢拿出这个。当年从老屋地基挖出的那块古木构件，我一直留着——它工艺古旧，不像今人做的，可我实在不知它原属哪朝哪代、哪户人家。就这一块，没别的了。你若好奇，拿去瞧瞧，只是别对外头声张。',
+    roster:'昔日在大城声名显赫，痛失爱子后归隐。修缮老屋时挖出一块工艺古旧的木构件，他只当古人旧物，心存疑惑却未深究。他将这唯一一块古木，交给了你。',
+    ending:'他把那块古木构件包好递来，又转去打磨手边的活计，背影一如往常沉静：老了，总得给后人留点念想。木匠铺的刨花香，依旧日日飘着。',
+    reward:{items:{wood:10}, coins:50},
+  },
+  axi:{
+    base:'守在河边垂钓的少女，被村里人捡回来养大，靠钓鱼为生，腕上总系着一枚来历不明的玉佩。人物底色：河边弃婴，活泼外表下藏着对身世的迷茫。',
+    shallow:'我记不得很小时候的事。醒来时，就躺在小河岸边。河水日夜流，像藏着无数说不清的故事。坐在河边钓鱼，我心里就安稳。',
+    s1done:'谢谢你修好渔网。我常想，要是亲人还在，他们该是什么模样。',
+    mid:'村里人对我都好，我很感激。可夜深人静坐在河边，我还是忍不住想：我到底从哪来？为什么会被丢在河畔？钓鱼，是我躲开这迷茫最好的法子。',
+    s2done:'河里时不时冲上来些旧东西，我悄悄收了几件。有一件，我从没拿给别人看过。',
+    foreshadow:'（摸着腕间的玉佩）我是山洪之后，在河边被发现的。身上只有这枚玉佩，我一直当它是命里的东西，盼着有一天能靠它弄清自己从哪来。可它究竟意味着什么，我一点也不懂。',
+    ultimate:'这枚玉佩，我从不离身，给你看看吧——它或许和我身世有关，可我完全不知道它和别的什么扯得上关系，只当是个念想。你要是能帮我打听到它的来历，我就谢天谢地了。',
+    roster:'河边被捡回的弃婴，性格活泼，心底对身世充满迷茫。山洪后在河边被发现，身上带着一枚古玉佩，她只当身世线索，全然不知玉佩可能与古遗迹有关。',
+    ending:'她把玉佩解下来，在你掌心放了放，又系回腕上，笑了：不管从哪来，这儿就是家。河边的钓竿，依旧日日升起。',
+    reward:{items:{rod:1, bait:5}, coins:50},
+  },
+  xinxin:{
+    base:'走街串巷的邮差，你收到的邮件都经他手送达。他手里偶尔有镇上买来的特殊物件，不妨找他交易。人物底色：漂泊孤儿，走遍世间，看透悲欢，内心向往安稳。',
+    shallow:'我跑遍无数城镇村落，见过形形色色的人。外头热闹，也藏着险恶。相聚别离，这一路我算是见惯了。',
+    s1done:'一封封信，载着无数人的思念。漂泊的人，不敢轻易对一处地方投入太深。',
+    mid:'我从小孤身一人，居无定所。从前我不在任何城镇久留，怕生了羁绊，离别的苦便加倍。来到自游小村，这里的温暖烟火，让我第一次想停下来。',
+    s2done:'我手上流通的稀奇物件，多半是旅人遗失的东西。见过的世面多了，反倒更惜眼前安稳。',
+    foreshadow:'（望着远方）我走过许多地方，也见过别处的古老村落——断壁残垣，比咱们村老上不知多少。可那些都是旁人的故事，我对咱们村脚下埋着什么，是一概不知的。',
+    ultimate:'我能给你的，只有我见过的那些外地古村的闲闻——别处山里塌出的旧石器、河滩上捡的碎陶，都是普通古人留下的杂物，和咱们村脚下是不是有什么，我一无所知。你要听，我便讲；别的，我实在帮不上。',
+    roster:'漂泊长大的孤儿，走遍各地阅尽人间悲欢，内心向往安稳归宿。他只讲外地其他古老村落的见闻，对本村地下遗迹毫不知情。',
+    ending:'他依旧天南地北地跑，却把这儿当成了真正的家。临行前他说：信，我给你留着；家，就在这儿。',
+    reward:{items:{berry:5, flower:5}, coins:50},
+  },
+  you:{
+    base:'听说从很远的地方来的，在村里经营着一家杂货铺，有种子出售，也卖些日常杂货。人物底色：远道而来的外乡人，谈吐温和，村里人都只当他是个做生意的。',
+    shallow:'我的家乡在很远的地方，风土人情和这里不同。我背井离乡来到此地，身上压着祖辈留下的念想。有些私事，现阶段不便细说。',
+    s1done:'这片土地产出的作物，倒是充满生气。我偶尔听人提起，这儿地下似乎有些老辈子的传说。',
+    mid:'祖辈留了本残破古籍，记的是先辈游历四方见闻，其中提到东方有片古老的农耕土地。我不过是个爱翻闲书、四处游历做生意的人，对这些古老传闻，也只是听听罢了。',
+    s2done:'在外头漂泊久了，只盼着能有个安稳落脚的地方，做点小本生意，平平淡淡过日子。',
+    foreshadow:'（摩挲着旧书页）这些残破书页，是祖辈手记的碎片，记着些遥远地方的农耕旧事。我不过是想念着故土，偶尔翻翻，并无他意。',
+    ultimate:'（目光微动，却仍笑着）说来，我对本地偶尔出土的古旧物件，倒是有那么一点兴趣——毕竟走南闯北，见了些稀奇玩意儿，总好奇它们的来路。不过也就是个外乡人的闲兴趣罢了，我可没什么别的心思，安心做生意便好。',
+    roster:'远道而来的外乡人，在村中开杂货铺，谈吐温和。村里所有人都只当他是普通生意人，无人看破。他至多流露出对本地古物的零星兴趣，真实目的始终隐瞒。',
+    ending:'他依旧守着杂货铺，笑盈盈地招呼往来村民，仿佛只是个再普通不过的外乡生意人。至于他心底还藏着什么，旁人无从知晓。',
+    reward:{items:{rare_seed:1}, coins:50},
+  },
+  // 老一辈其余 NPC + 年轻一辈 + 老陶，统一按新世界观撰写（无跨NPC遗迹真相泄露）
+  ling:{
+    base:'住在村子西侧的草药婆婆，懂许多草药，平日熬制药剂，也收购村民采来的草药。人物底色：老伴早逝，独居守着药草屋与山林。',
+    shallow:'我这一生，多半守着这片山林采药。早年随游医走南闯北，识得些偏方，后来便回来了，守着这间小屋。',
+    s1done:'药草长在土里，急不得，人也一样。谢谢你帮我校药篓。',
+    mid:'我的老伴早年就去了，我没什么牵绊，便守着药草屋，与药香做伴。行医一生，最盼的便是护住全村人的身子骨。',
+    s2done:'行医这些年，见惯了生老病死。能护着大家平安，我这辈子便值了。',
+    foreshadow:'（压低声音）山洪过后，林子里长出一批古怪草药，只长在靠北那几片土上，别处一棵也不生。我只觉那土很特别，却说不清来历，也从没深想——只是默默记下了那几片地方。',
+    ultimate:'你既问起，我便告诉你吧：北边林子，靠溪那几片红斑土，便是那些怪草生长的地方。我只当是土性特别，从不明白它为何只长在那儿。这片地方，你可记下，别的我也就不知道了。',
+    roster:'一生守山林采药，老伴早逝，独居度日。山洪后林中长出只生于特殊土层的怪草，她只知土很特别，不知土层来源。她将那几片特殊土层的位置，告诉了你。',
+    ending:'她把北边林地的几处土脉位置细细画给你，又转身去照看她的药圃：只要药草还绿着，这村子便安康。药草屋的炊烟，依旧袅袅。',
+    reward:{items:{potion:2}, coins:50},
+  },
+  yuan:{
+    base:'北边林间的年轻猎人，性情耿直，擅长设陷阱与狩猎，也收售兽皮。人物底色：习惯山林独居，守着村子外围的安宁。',
+    shallow:'我习惯在林子里转，村人难得见我几回。外头野兽的动静，我比谁都清楚。',
+    s1done:'林子里的路，我熟。有事，去木屋找我。',
+    mid:'我厌倦人群里的纷争，偏爱上山野的自由。只有在林子里，我才睡得安稳。守着林子，也守着村子外围的太平。',
+    s2done:'山里的风，比人话干净。我乐意守着这片林。',
+    foreshadow:'（望向山林）山洪过后，林子里地貌大变，我巡山时翻出过些旧石器、兽骨，埋在土里。我只当是远古野兽的遗骸、古人的普通杂物，没往别处想，也没跟人提。',
+    ultimate:'你要找老物件，我可以告诉你几处地方：北坡塌方的土坎、溪源头的乱石堆、还有老猎道拐角——那些旧石器、兽骨，都在那儿露着。别的我也就不知道了，我只当是古人留下的寻常东西。',
+    roster:'习惯山林独居，性格沉默，守护村子外围野兽威胁。山洪后巡山见过地下翻出的旧石器、兽骨，他只当远古野兽遗骸与古人杂物，不联想大型古文明。他将林中发现古旧物件的几处地点，告诉了你。',
+    ending:'他把林中几处旧物出土地点指给你，扛上猎枪又钻进了林子：这山，我守着便好。林间的风，依旧自由。',
+    reward:{items:{trap:2}, coins:50},
+  },
+  zhishu:{
+    base:'村中私塾的少年，聪慧好学，痴迷古籍与村中旧事。人物底色：看透官场，放弃功名回乡整理乡土故事。',
+    shallow:'我读的书不少，可最上心的，还是咱们村自己的故事。那些典故，比圣贤文章有意思。',
+    s1done:'这些残页，我抄了许久。多谢你帮我留意。',
+    mid:'我看过官场的蝇营狗苟，索性弃了功名，回乡把乡土故事一一记下。我最大的心愿，是别让村子的记忆随老人们老去。',
+    s2done:'书页会旧，故事不会。我想把它们都留下来。',
+    foreshadow:'（翻着残卷）山洪毁了许多旧书，我四处搜罗残破文本，倒从一本模糊的地方志里，读到一句——此地“古有农人聚居”。就这一句，再无细节，我也只当是古人随手记的。',
+    ultimate:'我把那页地方志的摘抄给你看：只写着此地“古有农人聚居”七个字，前后都没了，再无半点细节。我猜是古人记的，可究竟是哪个年代、什么样的农人，我一概不知，更不敢妄断。',
+    roster:'看透官场，放弃功名回乡整理乡土故事，盼望留存村子记忆。他读过模糊地方志只写此地“古有农人聚居”，记载极简略，只有一句话，没有细节。他将那页残缺地方志摘抄，交给了你。',
+    ending:'他把那页残破地方志小心夹进书里，眼里亮着光：村子的故事，总算有人接着记了。私塾的窗下，又响起抄书的沙沙声。',
+    reward:{items:{rare_seed:1}, coins:50},
+  },
+  cui:{
+    base:'十字路口酒馆的老板娘，爽朗能干，亲手烹制招牌料理，也收售渔获与作物。人物底色：丈夫常年在外经商，她守着酒馆撑起一村人的烟火。',
+    shallow:'我这酒馆，开了有些年头了。村中谁的喜好，我门儿清，常替人牵线搭桥。',
+    s1done:'来，尝尝新做的菜。村子的事，离不开一口热饭。',
+    mid:'我那口子常年在外头经商，我便守着这酒馆，把一村人的烟火气撑了起来。看似八面玲珑，其实最重情义，谁有难处我都搭把手。',
+    s2done:'守着这酒馆，村里人的悲欢我都收在心里。只要灯还亮着，这里就是个家。',
+    foreshadow:'（压低声音）山洪过后，村里常有人捡到些古怪老物件——锈了的铜片、说不清年月的木疙瘩。大伙儿私下闲聊，生出各种荒诞传言，什么地下有古城、有宝物……我听过好多版本，可谁真谁假，我实在分不清，也只是当闲谈听听。',
+    ultimate:'你既信得过我，我把这些年听来的闲话都转述给你：有人说地下埋着古城，有人说河底沉了宝贝，还有人说山里有古墓……全是口口相传的流言，没一个见着真凭实据。我可不敢说这些是真的，你听听便罢，别当真。',
+    roster:'经营酒馆，倾听全村悲欢，丈夫常年在外经商。山洪后村民常捡到古怪老物件，她听过各种荒诞民间传闻，却分不清真假。她把多年听来的流言，原样转述给了你，全无实证。',
+    ending:'她把那些荒唐又温情的村中闲话讲完，笑着给你斟了杯热酒：这村子，咱们一起守着。酒馆的灯，又亮到了深夜。',
+    reward:{items:{dish:2}, coins:50},
+  },
+  tao:{
+    base:'村里的陶匠，一辈子与陶土窑火相伴，村中碗罐多半出自他手。人物底色：痛失爱女，把思念都揉进了泥里、烧进了窑里。',
+    shallow:'我这一辈子，都在这窑火边转。捏泥、拉坯、烧窑，日子就这么过去了。早些年，家里还有个爱画画的小丫头，热闹得很。',
+    s1done:'窑火不熄，日子就还在。谢谢你帮我把窑砌好。',
+    mid:'我的女儿……一场病带走了她，那年以后，我便越发沉默，只守着这旧窑，仿佛窑火不灭，她就还在。',
+    s2done:'这些纹样，是她生前爱画的。我照着烧了几回，权当陪她。',
+    foreshadow:'（望着残破的陶片）山洪冲毁窑房那年，雨水从地里冲出好多古旧的陶片，上面的花纹……竟和我闺女画的纹样有几分巧。我只当是奇妙的缘分，从没细想这些陶片究竟来自何处、属于什么年月。',
+    ultimate:'这几片带花纹的古陶残片，你拿去吧。都是山洪冲出来、我捡回去留着的。上面的纹样巧得很，可我实在不知道它们打哪来、是何人何时烧的——只当是个念想。别的，我也就不清楚了。',
+    roster:'一辈子与陶土相伴，痛失爱女。山洪冲出大量古陶碎片，纹样与女儿画痕巧合，他只当奇妙缘分，不知陶片来自千年前古村落。他将几片带花纹古陶残片，交给了你。',
+    ending:'他把几片古陶残片用布包好递来，手上的泥渍未洗净：丫头若还在，该也喜欢这些老物件。窑火映着他平和的侧脸，仿佛那道旧伤，终于被人轻轻接住了。',
+    reward:{items:{rare_seed:1}, coins:50},
+  },
+};
+function allChainDone(id){ const ch=NPC_CHAINS[id], qs=state.quests[id]; if(!ch||!qs||!qs.chainDone) return false; return ch.every((s,i)=>qs.chainDone[i]===true); }
+function endingUnlocked(id){ return !!NPC_SECRET[id] && allChainDone(id) && (state.goodwill[id]||0)>=900; }
+// 全局结局装配：全部10位NPC均至交(>=900)且支线全完成，才允许玩家拼合完整主线真相
+const ALL_NPC_IDS = ['granny','carpenter','axi','xinxin','you','ling','yuan','zhishu','cui','tao'];
+function allSecretsComplete(){
+  return ALL_NPC_IDS.every(id=> (state.goodwill[id]||0)>=900 && allChainDone(id));
+}
+// 往事秘辛分段解锁状态：浅层(友好·本档下限)｜中层(投缘·本档下限且阶段一完成)｜终极(至交·本档下限且铺垫任务完成)
+function storyUnlocked(id){
+  const g=state.goodwill[id]||0;
+  const qs=state.quests[id];
+  const d0=qs&&qs.chainDone&&qs.chainDone[0];
+  const d2=qs&&qs.chainDone&&qs.chainDone[2];
+  return { shallow:g>=FAVOR_RANGES[2][0], mid:g>=FAVOR_RANGES[4][0]&&!!d0, ultimate:g>=FAVOR_RANGES[6][0]&&!!d2 };
+}
+
+/* ---------------- 孩童 NPC：星期作息 + 场景对话 + 陪伴采集 ----------------
+   硬性约束：孩童不了解古遗迹真相，至交仅交出“玩耍地点”坐标；
+   完整主线仍需收集全部10位成年NPC线索自行拼接。星期仅驱动 UI 与作息，
+   不动作物生长/天气刷新/游戏时间原有机制。 */
+const CHILD_HELP_DURATION = 90;   // 邀请帮忙采集持续时长（秒，实时）
+const CHILD_HELP_COOLDOWN = 180;  // 采集结束后冷却（秒）
+// 作息点位（tile 坐标，已核对避开建筑/农田/阻挡）：wd=星期索引数组，sh/eh=时段(小时，左闭右开)
+// ale/wan=该时段两童坐标；aleLine/wanLine=点击触发的友好场景对话
+const CHILD_SCHEDULE = [
+  // 周一~周五 8-12 书塾旁边上课（书塾位于 (41,40)，坐标改为 (44,39)/(45,39) 北侧门外）
+  {wd:[0,1,2,3,4], sh:8, eh:12, ale:{tx:44,ty:39}, wan:{tx:45,ty:39},
+    aleLine:'知书哥哥在教我们认字读书，好多字好难记。',
+    wanLine:'我很喜欢听哥哥讲书本里面的小故事。'},
+  // 周一 13-16 村长家、木工坊附近（ale→村长家、wan→木工坊）
+  {wd:[0], sh:13, eh:16, ale:{tx:16,ty:27}, wan:{tx:35,ty:17},
+    aleLine:'游村长会讲村子很久以前的事情，木伯爷爷会给我们看好看的小木件。',
+    wanLine:'我喜欢听游村长讲开荒建村的往事。'},
+  // 周二 13-16 酒馆（两童在酒馆侧边）
+  {wd:[1], sh:13, eh:16, ale:{tx:4,ty:26}, wan:{tx:6,ty:26},
+    aleLine:'我们在这里玩扮家家酒！妈妈会给我们一点点小点心。',
+    wanLine:'酒馆热热闹闹的，玩游戏特别有意思。'},
+  // 周三 13-16 ale→玲婆婆(酒馆侧)、wan→陶叔
+  {wd:[2], sh:13, eh:16, ale:{tx:5,ty:26}, wan:{tx:14,ty:14},
+    aleLine:'玲婆婆带我认识山上各种各样的花草草药，好多名字我记不住。',
+    wanLine:'老陶爷爷教我捏泥巴，捏出来的小罐子歪歪扭扭的。'},
+  // 周四 13-16 中央广场（中央瓷砖硬地区 x=21..40, y=20..30 内）
+  {wd:[3], sh:13, eh:16, ale:{tx:25,ty:25}, wan:{tx:30,ty:25},
+    aleLine:'广场上跑跑跳跳太好玩啦！',
+    wanLine:'没有大人管束，我们可以自由自在玩耍。'},
+  // 周五 13-16 邮局旁边（小信现位于东广场 (59,24)，坐标改为门口 (62,27)）
+  {wd:[4], sh:13, eh:16, ale:{tx:62,ty:27}, wan:{tx:63,ty:27},
+    aleLine:'小信哥哥从镇子回来，会带给我们新奇小玩意儿！',
+    wanLine:'小镇的零食甜甜的，听小镇的趣事特别有趣。'},
+  // 周六 9-16 月湖步行道/小岛附近（步行道 x=60, y=47..50，小岛 x=60..66, y=42..47）
+  {wd:[5], sh:9, eh:16, ale:{tx:61,ty:45}, wan:{tx:63,ty:45},
+    aleLine:'我们跟着阿溪姐姐钓鱼，希望今天可以钓到大鱼！',
+    wanLine:'烤鱼闻起来香香的，阿远哥哥会帮我们驱赶河边的小虫。'},
+  // 周日 9-16 杂货铺旁边（许先生现位于东广场 (50,24)，坐标改为门口 (50,28)）
+  {wd:[6], sh:9, eh:16, ale:{tx:50,ty:28}, wan:{tx:52,ty:28},
+    aleLine:'许先生见过好多很远的地方，那些故事听着好神奇。',
+    wanLine:'真希望有一天，我也可以去外面看一看。'},
+];
+// 至交999 交出的"遗迹点位"提示（孩童自身不理解遗迹意义，仅当玩耍地点）
+const CHILD_RELIC = {
+  ale:{hint:'木犀山右边的山地里有个土坑，最好玩啦！', tx:55, ty:4},
+  wan:{hint:'木犀山高处有块露出角的怪石头！', tx:58, ty:4},
+};
+// 遗迹点位总表：4处全部位于木犀山山地范围内（x=51..60, y=1..18）
+const RELICS = [
+  {id:'ale_pit',   name:'阿乐的土坑遗迹',   tx:55,ty:4, kind:'child'},
+  {id:'wan_stone', name:'小晚的花纹石遗迹', tx:58,ty:4, kind:'child'},
+  {id:'valley_1',  name:'山谷残片·甲',     tx:57,ty:8, kind:'high'},
+  {id:'valley_2',  name:'山谷残片·乙',     tx:56,ty:12, kind:'high'},
+];
+// 当前时段该孩童的目标点位（作息命中则去对应点，否则回默认出生点）
+function childTargetTile(npc){
+  const wd=weekdayIndex(), t=state.time;
+  for(const r of CHILD_SCHEDULE){
+    if(r.wd.indexOf(wd)>=0 && t>=r.sh && t<r.eh){
+      const pos=r[npc.id]; if(pos) return pos;
+    }
+  }
+  return {tx:npc.homeTx, ty:npc.homeTy};
+}
+// 当前时段该孩童的友好场景对话（无则返回 null）
+function childSceneLine(id){
+  const wd=weekdayIndex(), t=state.time;
+  for(const r of CHILD_SCHEDULE){
+    if(r.wd.indexOf(wd)>=0 && t>=r.sh && t<r.eh){
+      const line=r[id+'Line']; if(line) return line;
+    }
+  }
+  return null;
+}
+// 邀请孩童帮忙采集：仅拾取地表蘑菇/野花，不伐木凿石；有时长与冷却
+function summonHelper(id){
+  const h=state.helpers[id]; if(!h) return;
+  if(h.active){ toast(npcName(id)+'已经在帮忙啦'); return; }
+  if(h.cd>0){ toast(npcName(id)+'还在歇着呢（冷却中）'); return; }
+  if((state.goodwill[id]||0)<900){ toast('需与TA成为至交才行'); return; }
+  h.active=true; h.t=CHILD_HELP_DURATION; h.gatherCd=0;
+  const spot=CHILD_RELIC[id];
+  save();
+  toast(npcName(id)+'蹦蹦跳跳跟着你：「'+spot.hint+'」');
+  openNPC(id);
+}
+
+/* ---------------- 好感档位（0~999，7档统一区间，全部NPC共用，含阿乐/小晚） ---------------- */
+// 区间：陌生0-99｜熟识100-249｜友好250-449｜亲近450-649｜投缘650-799｜知己800-899｜至交900-999
+const FAVOR_TIERS = ['陌生','熟识','友好','亲近','投缘','知己','至交'];
+const FAVOR_RANGES = [[0,99],[100,249],[250,449],[450,649],[650,799],[800,899],[900,999]];
+const FAVOR_MAX = 999;
+function favorInfo(v){
+  v = clamp(v,0,FAVOR_MAX);
+  let idx=0;
+  for(let i=0;i<FAVOR_RANGES.length;i++){ if(v>=FAVOR_RANGES[i][0]) idx=i; }
+  const lo=FAVOR_RANGES[idx][0], hi=FAVOR_RANGES[idx][1];
+  // value=当前总好感值；max=本等级上限(hi)；prog/span=本等级内进度（用于进度条）
+  return {idx, tier:FAVOR_TIERS[idx], value:v, lo, hi, max:hi, prog:v-lo, span:hi-lo};
+}
+function favorMin(tierIdx){ return FAVOR_RANGES[tierIdx][0]; } // 该档位解锁所需的最低好感
+function goodwillTier(v){ return favorInfo(v).tier; }
+// 增加好感：至交(900+)上限默认999；但在完成该NPC“铺垫任务”(三段全完成)之前，锁定在知己上限899
+// （硬性：完成铺垫任务，才开放至交999好感上限）。孩童NPC无任务链，上限恒为999。
+function favorCap(id){ return (NPC_CHAINS[id] && !allChainDone(id)) ? FAVOR_RANGES[5][1] : FAVOR_MAX; } // 知己上限899 / 999
+function addFavor(id, n){
+  const cap = favorCap(id);
+  state.goodwill[id] = clamp((state.goodwill[id]||0)+n, 0, cap);
+}
+// 天气/时间/场景判定
+function isRain(){ const w=state.weather; return w==='小雨'||w==='大雨'||w==='雷阵雨'; }
+function isNight(){ return state.time<6 || state.time>=20; } // 夜晚
+function nearMapEdge(){ const tx=Math.floor(state.px/TILE), ty=Math.floor(state.py/TILE); return tx<=1||ty<=1||tx>=MAP_W-2||ty>=MAP_H-2; }
+function sceneReady(st){
+  if(!st||!st.scene) return true;
+  if(st.scene==='rain_night') return isRain() && isNight();
+  if(st.scene==='edge') return nearMapEdge();
+  return false; // deliver / interview 由交谈推进
+}
+function npcName(id){ const n=map.npcs.find(x=>x.id===id); return n?n.name:id; }
+// 发放额外农田（任务奖励用）
+function grantPlots(n){
+  for(let i=0;i<n;i++){
+    if(state.unlockedPlotCount<map.plotSlots.length){
+      const s=map.plotSlots[state.unlockedPlotCount++];
+      map.plots.push({tx:s.tx,ty:s.ty,stage:'wild',crop:null,watered:false});
+      map.occupied.add(key(s.tx,s.ty));
+    }
+  }
+}
+// 机会掉落（世界采集/伐木/凿石/钓鱼时偶发）：返回掉落物品 id 或 null，由调用处拼装提示
+function chanceDrop(item, prob){ if(Math.random()<prob){ addItem(item,1); return item; } return null; }
+// 交谈推进“送达/打听”类任务：与对应NPC对话即可标记进度，全部完成自动交任务
+// 返回值：若因此完成了某任务（已接管弹窗）则 true，调用方应中止自身弹窗构建
+function handleChainDelivery(talkId){
+  for(const id in NPC_CHAINS){
+    const ch=NPC_CHAINS[id]; const qs=state.quests[id];
+    if(!qs || qs.accepted<0 || qs.chainDone[qs.accepted]) continue;
+    const st=ch[qs.accepted];
+    if((st.scene==='deliver'||st.scene==='interview') && st.targets && st.targets.indexOf(talkId)>=0){
+      const kn = st.scene==='deliver' ? 'deliver' : 'interview';
+      if(!qs[kn]){ qs[kn]={}; for(const t of st.targets) qs[kn][t]=false; }
+      if(!qs[kn][talkId]){
+        qs[kn][talkId]=true; save();
+        const n=Object.values(qs[kn]).filter(Boolean).length;
+        toast((st.scene==='deliver'?'已将信件交给 ':'已向 ')+npcName(talkId)+(st.scene==='deliver'?'（'+n+'/'+st.targets.length+'）':' 打听传闻（'+n+'/'+st.targets.length+'）'));
+        if(n>=st.targets.length){ submitChainQuest(id, qs.accepted); return true; }
+      }
+    }
+  }
+  return false;
+}
+// 场景任务自动完成（在游戏循环/打开NPC时调用）
+function checkSceneQuests(){
+  for(const id in NPC_CHAINS){
+    const ch=NPC_CHAINS[id]; const qs=state.quests[id];
+    if(!qs || qs.accepted<0 || qs.chainDone[qs.accepted]) continue;
+    const st=ch[qs.accepted];
+    if(st.scene==='edge' && nearMapEdge()){ submitChainQuest(id, qs.accepted); return; }
+  }
+}
+
+/* ---------------- 存档 ---------------- */
+function save(){
+  try{
+    const d={
+      px:state.px, py:state.py, dir:state.dir, stamina:state.stamina, maxStamina:state.maxStamina,
+      day:state.day, time:state.time, weather:state.weather, weatherDays:state.weatherDays, pendingWeather:state.pendingWeather, pendingDays:state.pendingDays, lastTyphoonDay:state.lastTyphoonDay, lastSnowDay:state.lastSnowDay, coin:state.coin, houseLevel:state.houseLevel,
+      unlockedPlotCount:state.unlockedPlotCount, inv:state.inv, goodwill:state.goodwill,
+      quests:state.quests, codex:state.codex, invOrder:state.invOrder, carpenterDiscount:state.carpenterDiscount, mainStoryUnlocked:state.mainStoryUnlocked, helpers:state.helpers,
+      randomQuests:state.randomQuests||{}, randomGifts:state.randomGifts||{},
+      plots: map.plots.map(p=>({tx:p.tx,ty:p.ty,stage:p.stage,crop:p.crop,watered:p.watered})),
+    };
+    localStorage.setItem(SAVE_KEY, JSON.stringify(d));
+  }catch(e){}
+}
+function load(){
+  try{
+    // URL 参数 ?reset=1（或 &reset=1）：强制清档开新局（处理坏档/卡死/想重开）
+    if(typeof location!=='undefined' && /[?&]reset=1/.test(location.search||'')){
+      try{ localStorage.removeItem(SAVE_KEY); }catch(e){}
+    }
+    const raw=localStorage.getItem(SAVE_KEY);
+    if(!raw) return false;
+    const d=JSON.parse(raw);
+    state = defaultState();
+    Object.assign(state, d);
+    // 自愈：玩家坐标非法/出画布（旧档损坏或曾卡出地图）→ 强制拉回小屋出生点
+    const HOME_X=2*TILE, HOME_Y=38*TILE;
+    if(!isFinite(state.px)||!isFinite(state.py)||state.px<0||state.py<0||state.px>=MAP_W*TILE||state.py>=MAP_H*TILE){
+      state.px=HOME_X; state.py=HOME_Y;
+    }
+    if(!state.inv) state.inv={};
+    if(!state.goodwill) state.goodwill={granny:0,carpenter:0,axi:0,xinxin:0,you:0};
+    for(const id of ['granny','carpenter','axi','xinxin','you','ling','yuan','zhishu','cui','tao','ale','wan']) if(state.goodwill[id]===undefined) state.goodwill[id]=0;
+    // 旧存档好感兼容：新等级表仍基于 0~999 同尺度，数值本身无需改写；
+    // 仅按“当前上限”收敛到新体系合法区间（未完成任务则锁定至 知己上限799，
+    // 已完成任务/无任务链的孩童则保持 999），既映射到新等级体系，又不抹掉玩家已有进度。
+    for(const id of Object.keys(state.goodwill)){
+      let v = clamp(state.goodwill[id]||0, 0, FAVOR_MAX);
+      state.goodwill[id] = Math.min(v, favorCap(id));
+    }
+    if(!state.helpers) state.helpers={ale:{active:false,t:0,cd:0,gatherCd:0},wan:{active:false,t:0,cd:0,gatherCd:0}};
+    if(!state.helpers.ale) state.helpers.ale={active:false,t:0,cd:0,gatherCd:0};
+    if(!state.helpers.wan) state.helpers.wan={active:false,t:0,cd:0,gatherCd:0};
+    if(!state.quests) state.quests={};
+    if(!state.codex) state.codex={};
+    if(!state.invOrder) state.invOrder=[];
+    if(state.gotAncientSeed===undefined) state.gotAncientSeed=false;
+    if(!state.endingClaimed) state.endingClaimed={};
+    if(state.carpenterDiscount===undefined) state.carpenterDiscount=false;
+    if(state.mainStoryUnlocked===undefined) state.mainStoryUnlocked=false;
+    if(state.invExpanded===undefined) state.invExpanded=false;
+    if(state.weatherDays===undefined) state.weatherDays=1;
+    if(state.pendingWeather===undefined) state.pendingWeather='晴';
+    if(state.pendingDays===undefined) state.pendingDays=1;
+    if(state.lastTyphoonDay===undefined) state.lastTyphoonDay=-99;
+    if(state.lastSnowDay===undefined) state.lastSnowDay=-99;
+    if(!state.randomQuests) state.randomQuests={};
+    if(!state.randomGifts) state.randomGifts={};
+    map = buildMap();
+    // 重建农田
+    map.plots = d.plots.map(p=>({tx:p.tx,ty:p.ty,stage:p.stage,crop:p.crop,watered:p.watered}));
+    // 额外农田占用（解锁过的不应再被随机占用——已通过 plotSlots 未被占用，安全）
+    for(const p of map.plots) map.occupied.add(key(p.tx,p.ty));
+    return true;
+  }catch(e){ return false; }
+}
+// 卡屏回退：强制把玩家拉回小屋出生点并保存（帮助弹窗内按钮；处理人物卡在画布外/障碍内）
+function fallbackToHome(){
+  state.px=2*TILE; state.py=38*TILE;
+  try{ save(); }catch(e){}
+  toast('已回到小屋出生点');
+}
+// 导出/导入存档（仅浏览器中点击触发，无头测试不调用，不影响逻辑）
+function exportSave(){
+  try{
+    const raw=localStorage.getItem(SAVE_KEY)||'{}';
+    const blob=new Blob([raw], {type:'application/json'});
+    const url=URL.createObjectURL(blob);
+    const a=document.createElement('a');
+    a.href=url; a.download='pixel_island_save.json';
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    setTimeout(()=>URL.revokeObjectURL(url), 1500);
+    toast('存档已导出为 JSON 文件');
+  }catch(e){ toast('导出失败：'+e.message); }
+}
+function importSave(){
+  try{
+    const inp=document.createElement('input');
+    inp.type='file'; inp.accept='application/json,.json'; inp.style.display='none';
+    inp.onchange=()=>{
+      const f=inp.files&&inp.files[0]; if(!f) return;
+      const reader=new FileReader();
+      reader.onload=()=>{
+        try{
+          const d=JSON.parse(String(reader.result));
+          if(typeof d!=='object' || d===null) throw new Error('格式错误');
+          localStorage.setItem(SAVE_KEY, JSON.stringify(d));
+          if(!load()) state=defaultState();
+          buildMenuButtons(); buildBottomButtons();
+          toast('存档导入成功，已载入');
+        }catch(err){ toast('导入失败：'+err.message); }
+      };
+      reader.readAsText(f);
+    };
+    document.body.appendChild(inp); inp.click(); document.body.removeChild(inp);
+  }catch(e){ toast('导入失败：'+e.message); }
+}
+
+/* ---------------- 背包 ---------------- */
+function addItem(id, n){
+  n=n||1;
+  state.inv[id]=(state.inv[id]||0)+n;
+  if(!state.invOrder) state.invOrder=[];
+  if(state.invOrder.indexOf(id)<0) state.invOrder.push(id);
+  state.codex[id]=true;
+}
+// 按显示顺序返回背包物品 id（过滤掉数量为0与金币占位）
+function invIds(){
+  const order = state.invOrder || [];
+  const present = order.filter(k=> (state.inv[k]||0)>0 && k!=='coin');
+  const extra = Object.keys(state.inv).filter(k=> (state.inv[k]||0)>0 && k!=='coin' && present.indexOf(k)<0);
+  return present.concat(extra);
+}
+// 展开背包时点物品置顶：移动到显示顺序最前，便于调整收起时顶部5格
+function reorderInv(id){
+  if(!state.invOrder) state.invOrder=[];
+  const i=state.invOrder.indexOf(id);
+  if(i>=0) state.invOrder.splice(i,1);
+  state.invOrder.unshift(id);
+  save(); toast('已置顶：'+(ITEMS[id]?ITEMS[id].name:id));
+}
+function hasItems(req){
+  for(const k in req){ if((state.inv[k]||0) < req[k]) return false; }
+  return true;
+}
+function takeItems(req){
+  for(const k in req){ state.inv[k]-=req[k]; if(state.inv[k]<=0) delete state.inv[k]; }
+}
+
+/* ---------------- 碰撞 ---------------- */
+function collides(px,py){
+  const half=14;
+  const minx=Math.floor((px-half)/TILE), maxx=Math.floor((px+half)/TILE);
+  const miny=Math.floor((py-half)/TILE), maxy=Math.floor((py+half)/TILE);
+  // 地图边界外视为阻挡：玩家/NPC 碰撞盒不允许超出画布 [0, MAP_W)×[0, MAP_H)
+  if(minx<0 || maxx>=MAP_W || miny<0 || maxy>=MAP_H) return true;
+  for(let tx=minx;tx<=maxx;tx++){
+    for(let ty=miny;ty<=maxy;ty++){
+      if(map.blocked.has(key(tx,ty))) return true;
+    }
+  }
+  return false;
+}
+
+/* ---------------- 相机 ---------------- */
+const cam={x:0,y:0};
+function updateCamera(){
+  cam.x = clamp(state.px - cw/2, 0, Math.max(0, WORLD_W-cw));
+  cam.y = clamp(state.py - ch/2, 0, Math.max(0, WORLD_H-ch));
+  if(WORLD_W<cw) cam.x=(WORLD_W-cw)/2;
+  if(WORLD_H<ch) cam.y=(WORLD_H-ch)/2;
+}
+
+/* ---------------- 输入 ---------------- */
+const keys={};
+window.addEventListener('keydown', e=>{
+  const k=e.key.toLowerCase();
+  if(['arrowup','arrowdown','arrowleft','arrowright',' '].includes(e.key.toLowerCase())||['w','a','s','d',' '].includes(k)){
+    e.preventDefault();
+  }
+  keys[k]=true;
+  if(k==='e' || k===' '){ tryInteractNPC(); }
+});
+window.addEventListener('keyup', e=>{ keys[e.key.toLowerCase()]=false; });
+
+let mouseX=0, mouseY=0;
+canvas.addEventListener('mousemove', e=>{
+  const r=canvas.getBoundingClientRect();
+  mouseX=e.clientX-r.left; mouseY=e.clientY-r.top;
+  hoverInv=null;
+  // 背包 hover 检测
+  for(const s of invSlotsRender){
+    if(mouseX>=s.x&&mouseX<=s.x+s.w&&mouseY>=s.y&&mouseY<=s.y+s.h){ hoverInv=s.id; break; }
+  }
+});
+canvas.addEventListener('mousedown', e=>{
+  const r=canvas.getBoundingClientRect();
+  onPointerDown(e.clientX-r.left, e.clientY-r.top);
+});
+// 统一指针按下处理（鼠标与触摸共用，原有全部交互逻辑保持不变）
+function onPointerDown(mx,my){
+  mouseX=mx; mouseY=my;
+  if(currentPopup){ handlePopupClick(mx,my); return; }
+  // 功能按钮组（地图/任务/图鉴/名册/帮助）
+  for(const b of menuButtons){
+    if(mx>=b.x&&mx<=b.x+b.w&&my>=b.y&&my<=b.y+b.h){ b.action(); return; }
+  }
+  // 底部按钮
+  for(const b of bottomButtons){
+    if(mx>=b.x&&mx<=b.x+b.w&&my>=b.y&&my<=b.y+b.h){ b.action(); return; }
+  }
+  // 展开背包时点物品：可食用物品右下角"食"按钮→食用恢复体力；其余点击→置顶排序（调整收起时顶部5格）
+  if(state.invExpanded){
+    for(const s of invSlotsRender){
+      if(s.eat && mx>=s.eat.x&&mx<=s.eat.x+s.eat.w&&my>=s.eat.y&&my<=s.eat.y+s.eat.h){ doEat(s.id); return; }
+    }
+    for(const s of invSlotsRender){
+      if(mx>=s.x&&mx<=s.x+s.w&&my>=s.y&&my<=s.y+s.h){ reorderInv(s.id); return; }
+    }
+  }
+  // 点击 NPC（灾害/小雪居家时不响应）
+  for(const npc of map.npcs){
+    if(npcHidden(npc)) continue;
+    const sx=npc.x-cam.x, sy=npc.y-cam.y;
+    if(dist(mx,my,sx,sy-26)<30){ openNPC(npc.id); return; }
+  }
+}
+// 移动端触摸映射：触摸屏幕坐标 → 画布坐标（与鼠标完全一致），弹窗内可拖拽滚动
+let _tAct=false, _tMoved=false, _tLY=0, _tsx=0, _tsy=0;
+function _tPt(t){ const r=canvas.getBoundingClientRect(); return {x:t.clientX-r.left, y:t.clientY-r.top}; }
+canvas.addEventListener('touchstart', e=>{
+  if(e.touches.length!==1) return;
+  const p=_tPt(e.touches[0]); _tsx=p.x; _tsy=p.y; _tLY=p.y; _tMoved=false; _tAct=true;
+  e.preventDefault();
+}, {passive:false});
+canvas.addEventListener('touchmove', e=>{
+  if(!_tAct || e.touches.length!==1) return;
+  const p=_tPt(e.touches[0]);
+  if(currentPopup){
+    if(Math.abs(p.y-_tsy)>6) _tMoved=true;
+    const dy=p.y-_tLY; _tLY=p.y;
+    const pp=currentPopup, clipH=pp.ph-pp.titleH-pp.tabsH-36;
+    pp.scrollY=clamp(pp.scrollY-dy, 0, Math.max(0, pp._cy-clipH));
+  } else if(Math.abs(p.x-_tsx)>8 || Math.abs(p.y-_tsy)>8) _tMoved=true;
+  e.preventDefault();
+}, {passive:false});
+canvas.addEventListener('touchend', e=>{
+  if(!_tAct) return; _tAct=false;
+  const t=(e.changedTouches&&e.changedTouches[0]); if(!t) return;
+  const p=_tPt(t);
+  if(currentPopup){ if(!_tMoved) handlePopupClick(p.x,p.y); }
+  else if(!_tMoved) onPointerDown(p.x,p.y);
+  e.preventDefault();
+}, {passive:false});
+
+canvas.addEventListener('wheel', e=>{
+  if(currentPopup){
+    e.preventDefault();
+    const p=currentPopup;
+    const clipH = p.ph - p.titleH - p.tabsH - 36;
+    const contentH = p._cy;
+    const max = Math.max(0, contentH - clipH);
+    p.scrollY = clamp(p.scrollY + (e.deltaY>0?28:-28), 0, max);
+  }
+},{passive:false});
+
+/* ---------------- Toast ---------------- */
+let toastMsg='', toastT=0;
+let hoverInv=null;
+function toast(m){ toastMsg=m; toastT=2.2; }
+
+/* ---------------- 交互NPC ---------------- */
+function nearestNPC(){
+  let best=null, bd=1e9;
+  for(const npc of map.npcs){
+    const d=dist(state.px,state.py,npc.x,npc.y);
+    if(d<bd){bd=d;best=npc;}
+  }
+  return (best&&bd< TILE*1.8)?best:null;
+}
+function tryInteractNPC(){
+  if(currentPopup) return;
+  const n=nearestNPC();
+  if(n) openNPC(n.id);
+}
+
+/* ================= 玩法动作 ================= */
+function nearPlot(){
+  let best=null,bd=1e9;
+  for(const p of map.plots){
+    const cx=(p.tx+0.5)*TILE, cy=(p.ty+0.5)*TILE;
+    const d=dist(state.px,state.py,cx,cy);
+    if(d<bd){bd=d;best=p;}
+  }
+  return (best&&bd< TILE*1.7)?best:null;
+}
+function nearType(arr, range){
+  let best=null,bd=1e9;
+  for(const o of arr){
+    const cx=(o.tx+0.5)*TILE, cy=(o.ty+0.5)*TILE;
+    const d=dist(state.px,state.py,cx,cy);
+    if(d<bd){bd=d;best=o;}
+  }
+  return (best&&bd<range)?best:null;
+}
+function nearWater(){
+  let best=null,bd=1e9;
+  for(let x=0;x<MAP_W;x++){for(let y=0;y<MAP_H;y++){
+    if(map.water.has(key(x,y))){
+      const cx=(x+0.5)*TILE, cy=(y+0.5)*TILE;
+      const d=dist(state.px,state.py,cx,cy);
+      if(d<bd){bd=d;best={x,y};}
+    }
+  }}
+  return (best&&bd<TILE*1.8)?best:null;
+}
+function nearAnimal(){
+  let best=null,bd=1e9;
+  for(const a of map.animals){
+    const cx=(a.tx+0.5)*TILE, cy=(a.ty+0.5)*TILE;
+    const d=dist(state.px,state.py,cx,cy);
+    if(d<bd){bd=d;best=a;}
+  }
+  return (best&&bd<TILE*1.8)?best:null;
+}
+function nearPlayerHouse(){
+  const hx=2*TILE, hy=40*TILE;   // 玩家房屋中心（tx=1..3, ty=39..41）
+  return dist(state.px,state.py,hx,hy) < TILE*2.4;
+}
+
+function doPlant(){
+  if(state.stamina<5){ toast('体力不足'); return; }
+  const p=nearPlot();
+  if(!p){ toast('附近没有可耕种的农田'); return; }
+  if(p.stage==='wild'){
+    p.stage='tilled'; spend(5); toast('开垦了一块农田'); save(); return;
+  }
+  if(p.stage==='tilled'){
+    // 选种子
+    const seeds=Object.keys(SEED_TO_CROP).filter(s=>(state.inv[s]||0)>0);
+    if(seeds.length===0){ toast('没有种子，去找许先生买吧'); return; }
+    openSeedChooser(p, seeds);
+    return;
+  }
+  if(p.stage==='seeded'||p.stage==='growing'){
+    // 浇水（种植按钮集成浇水，需求未设独立浇水按钮）
+    if(p.watered){ toast('已经浇过水啦，睡觉可催熟'); return; }
+    p.watered=true; if(p.stage==='seeded') p.stage='growing';
+    spend(3); toast('浇水完成'); save(); return;
+  }
+  if(p.stage==='mature'){
+    const cropName = ITEMS[p.crop].name;
+    addItem(p.crop,1);
+    p.stage='tilled'; p.crop=null; p.watered=false;
+    spend(5); toast('收获 '+cropName+' 成功');
+    save(); return;
+  }
+}
+function openSeedChooser(plot, seeds){
+  const p=openBlankPopup('选择种子', {});
+  const pad=18, cw0=p.pw-pad*2;
+  addText(p,'点击种子播种到附近农田',0,cw0,COL.sub,13); addGap(p,6);
+  for(const s of seeds){
+    addText(p, ITEMS[s].name+' x'+(state.inv[s]||0), 0, cw0-90, COL.text, 14);
+    addButton(p,'播种', cw0-82, 82, 30, ()=>{ plantWith(plot, s); closePopup(); });
+    addGap(p,4);
+  }
+  addButton(p,'取消', 0, cw0, 30, ()=>closePopup(), true, COL.sub);
+  finalizePopup(p);
+}
+function plantWith(p, seed){
+  p.stage='seeded'; p.crop=SEED_TO_CROP[seed]; p.watered=false;
+  state.inv[seed]--; if(state.inv[seed]<=0) delete state.inv[seed];
+  spend(5); state.codex[seed]=true;
+  toast('播种了 '+ITEMS[seed].name);
+  save();
+}
+function doCollect(){
+  const r=nearType(map.resources, TILE*1.6);
+  if(!r){ toast('附近没有可采集物'); return; }
+  if(r.depleted){ toast('今天已经采集过了'); return; }
+  const item = r.type;
+  addItem(item,1); r.depleted=true; spend(4);
+  const d=chanceDrop('trinket',0.25)||chanceDrop('page',0.10);
+  toast(d? ('采集到 '+ITEMS[item].name+'，获得'+ITEMS[d].name) : ('采集到 '+ITEMS[item].name)); save();
+}
+function doFish(){
+  if(!nearWater()){ toast('要到水边才能钓鱼'); return; }
+  if(state.stamina<6){ toast('体力不足'); return; }
+  const fish=choice(['fish_carp','fish_bass','shrimp']);
+  addItem(fish,1); spend(6);
+  const d=chanceDrop('relic',0.20);
+  toast(d? ('钓到了 '+ITEMS[fish].name+'，获得'+ITEMS[d].name) : ('钓到了 '+ITEMS[fish].name)); save();
+}
+function doAnimal(){
+  const a=nearAnimal();
+  if(!a){ toast('附近没有动物'); return; }
+  if(a.depleted){ toast('今天已经照顾过了'); return; }
+  addItem(a.product,1);
+  if(a.hide && Math.random()<0.5) addItem(a.hide,1);
+  a.depleted=true; spend(4); toast('获得 '+ITEMS[a.product].name); save();
+}
+function doEat(id){
+  if(!id || !(id in EDIBLE)){ return; }
+  if((state.inv[id]||0)<=0){ toast('没有'+ITEMS[id].name); return; }
+  if(state.stamina>=state.maxStamina){ toast('体力已满，吃不下了'); return; }
+  state.inv[id]--; if(state.inv[id]<=0) delete state.inv[id];
+  state.stamina=Math.min(state.maxStamina, state.stamina+EDIBLE[id]);
+  toast('食用'+ITEMS[id].name+'，恢复'+EDIBLE[id]+'体力'); save();
+}
+function doSleep(){
+  if(!nearPlayerHouse()){ toast('要回到自己的小屋才能睡觉'); return; }
+  startSleep();
+}
+function startSleep(){
+  state.sleeping=true; state.sleepTimer=1.6;
+}
+function finishSleep(){
+  state.sleeping=false;
+  state.day+=1;
+  state.time=8;
+  state.stamina=state.maxStamina;
+  // 天气推进：仅睡觉切换；普通天气持续1-3天，灾害固定1天
+  state.weatherDays = (state.weatherDays||1) - 1;
+  if(state.weatherDays>0){
+    // 当前天气延续
+  } else {
+    applyWeather(state.pendingWeather, state.day);
+  }
+  const W = state.weather;
+  const storm = (W==='雷阵雨');
+  const lightSnow = (W==='小雪');
+  const heavySnow = (W==='大雪');
+  // 作物生长 + 天气影响
+  for(const p of map.plots){
+    if(storm) p.watered=true;                 // 雷阵雨：全田自动浇水
+    if(p.watered){
+      if(p.stage==='seeded'){
+        if(storm){                             // 新种子高概率冲毁
+          if(Math.random()<0.7){ p.stage='tilled'; p.crop=null; }
+          else p.stage='growing';
+        } else if(lightSnow){                  // 小雪：仅耐寒作物正常生长
+          if(COLD_RESIST[p.crop]) p.stage='growing';
+        } else if(heavySnow){                  // 大雪：非冬作物大概率枯死；冬作物减速
+          if(!COLD_RESIST[p.crop]){ if(Math.random()<0.7){ p.stage='tilled'; p.crop=null; } }
+          else if(Math.random()<0.5) p.stage='growing';
+        } else { p.stage='growing'; }
+      } else if(p.stage==='growing'){
+        if(heavySnow && !COLD_RESIST[p.crop]){ // 非冬作物大雪枯死
+          if(Math.random()<0.7){ p.stage='tilled'; p.crop=null; } else p.stage='mature';
+        } else if(lightSnow){
+          if(COLD_RESIST[p.crop]) p.stage='mature'; // 仅耐寒成熟
+        } else if(heavySnow){
+          if(COLD_RESIST[p.crop] && Math.random()<0.5) p.stage='mature';
+        } else { p.stage='mature'; }
+      }
+      p.watered=false;
+    }
+    // 成熟作物小概率雷击损毁（雷阵雨）
+    if(storm && p.stage==='mature' && Math.random()<0.15){ p.stage='tilled'; p.crop=null; p.watered=false; }
+  }
+  // 采集物/动物/树木/石头重置 + 天气影响采集物
+  for(const r of map.resources){
+    if(heavySnow){ r.depleted=true; }                       // 大雪：无野外采集物
+    else if(lightSnow){ r.depleted=false; r.type=choice(WINTER_RES); } // 小雪：只刷新冬日专属
+    else if(storm){ r.depleted = Math.random()<0.5; }       // 雷阵雨：部分被冲刷消失
+    else { r.depleted=false; }
+  }
+  for(const a of map.animals) a.depleted=false;
+  for(const t of map.trees) t.depleted=false;
+  for(const r of map.rocks) r.depleted=false;
+  toast('新的一天 · '+SEASONS[Math.floor((state.day-1)/SEASON_DAYS)%4]+'季 第'+(((state.day-1)%SEASON_DAYS)+1)+'天');
+  save();
+}
+function doChop(){
+  const t=nearType(map.trees, TILE*1.6);
+  if(!t){ toast('附近没有树木'); return; }
+  if(t.depleted){ toast('这棵树已经砍过了'); return; }
+  if(state.stamina<7){ toast('体力不足'); return; }
+  addItem('wood',1); t.depleted=true; spend(7);
+  const d=chanceDrop('resin',0.30)||chanceDrop('vine',0.20)||chanceDrop('chisel',0.06);
+  toast(d? ('砍到木头，获得'+ITEMS[d].name) : '砍到木头'); save();
+}
+function doMine(){
+  const r=nearType(map.rocks, TILE*1.6);
+  if(!r){ toast('附近没有石头'); return; }
+  if(r.depleted){ toast('这块石头已经凿过了'); return; }
+  if(state.stamina<8){ toast('体力不足'); return; }
+  addItem('stone',1); r.depleted=true; spend(8);
+  const d=chanceDrop('pottery',0.25)||chanceDrop('page',0.15);
+  toast(d? ('凿到石头，获得'+ITEMS[d].name) : '凿到石头'); save();
+}
+
+/* ================= NPC 交互 ================= */
+function npcQuote(id){
+  const w=state.weather;
+  const q=NPC_QUOTES[id];
+  if(q){
+    if(isDisaster(w) && q.灾) return choice(q.灾);
+    if((w==='小雪'||w==='大雪') && q.雪) return choice(q.雪);
+    if((w==='小雨'||w==='大雨') && q.雨) return choice(q.雨);
+    if((w==='晴'||w==='多云') && q.晴) return choice(q.晴);
+    if(q.default) return choice(q.default);
+  }
+  return choice(['今天天气真不错。','欢迎来到自游小村。','有什么需要帮忙的吗？','村子最近很热闹呢。']);
+}
+// 灾害天气 / 小雪(玲婆婆) 时 NPC 不在地图显示（名册仍可交互）
+function npcHidden(npc){
+  const w=state.weather;
+  if(isDisaster(w) && !npc.child) return true;   // 孩童不消失，仅回出生点待机
+  if(w==='小雪' && npc.id==='ling') return true;
+  return false;
+}
+function renderChildNPC(id, npc){
+  const p=openBlankPopup(npc.name, {});
+  const pad=18, cw0=p.pw-pad*2;
+  const g=state.goodwill[id]||0;
+  const fi=favorInfo(g);
+  addText(p, npc.role, 0, cw0, COL.sub, 14);
+  addText(p, '好感：'+fi.tier+'  '+fi.value+'/'+fi.max, 0, cw0, COL.text, 15);
+  addBar(p, fi.prog/fi.span, cw0);
+  addGap(p,8);
+  // 当前时段场景对话（友好）
+  const line=childSceneLine(id);
+  if(line){
+    addText(p,'〔此时此刻 · '+weekdayName()+'〕', 0, cw0, COL.accent, 13);
+    addText(p, line, 0, cw0, COL.text, 13);
+  } else {
+    addText(p, '（这会儿不是出来玩耍的时辰，'+npc.name+'在'+npc.homeName+'附近玩呢。）', 0, cw0, COL.sub, 12);
+  }
+  addGap(p,8);
+  // 至交：邀请帮忙采集（不赠送实物道具，仅陪伴采集地表蘑菇/野花）
+  const h=state.helpers[id];
+  if(g>=900){
+    addGap(p,2);
+    if(h.active){
+      addText(p, 'TA正跟着你一起采集，剩 '+Math.ceil(h.t)+' 秒。', 0, cw0, COL.accent2, 13);
+      addButton(p,'采集中…', 0, cw0, 34, ()=>{}, false, COL.sub);
+    } else if(h.cd>0){
+      addText(p, 'TA玩累了，需要歇一会儿（冷却 '+Math.ceil(h.cd)+' 秒）。', 0, cw0, COL.sub, 13);
+      addButton(p,'冷却中…', 0, cw0, 34, ()=>{}, false, COL.sub);
+    } else {
+      addText(p, 'TA愿意陪你一起去采集地表蘑菇与野花（不可伐木凿石）。', 0, cw0, COL.sub, 13);
+      addButton(p,'邀请'+npc.name+'帮忙采集', 0, cw0, 34, ()=>{ summonHelper(id); });
+    }
+  }
+  // 随机委托（孩童也有任务池）
+  renderRandomQuest(id, p, cw0);
+  // 高好感一次性赠礼（阿乐/小晚）
+  if((id==='ale'||id==='wan') && g>=900 && !state.randomGifts[id]){
+    addButton(p,'🎁 领取好感赠礼（小采集物）', 0, cw0, 34, ()=>{ claimGoodwillGift(id); openNPC(id); });
+  }
+  addGap(p,6);
+  // 通用交互按钮：交谈 / 赠送礼物 / 介绍
+  addButton(p,'💬 交谈', 0, cw0, 34, ()=>{ openNPC(id); });
+  addButton(p,'🎁 赠送礼物', 0, cw0, 34, ()=>{ openGift(id); });
+  addButton(p,'📖 介绍', 0, cw0, 34, ()=>{ openSecret(id); });
+  addButton(p,'关闭', 0, cw0, 30, ()=>{ closePopup(); }, true, COL.sub);
+  finalizePopup(p);
+}
+function openNPC(id){
+  const npc=map.npcs.find(n=>n.id===id);
+  if(!npc) return;
+  // 孩童 NPC：独立的陪伴采集弹窗（无任务链/无往事秘辛）
+  if(npc.child){ renderChildNPC(id, npc); return; }
+  // 交谈推进“送达/打听”类任务（与对应NPC对话即可标记进度）；若因此完成则已接管弹窗
+  if(handleChainDelivery(id)) return;
+  // 雨夜河畔守候：雨天夜晚找阿溪即触发场景事件
+  if(id==='axi'){
+    const qs=state.quests['axi'];
+    if(qs && qs.accepted>=0 && !qs.chainDone[qs.accepted]){
+      const st=NPC_CHAINS['axi'][qs.accepted];
+      if(st.scene==='rain_night' && sceneReady(st)){ submitChainQuest('axi', qs.accepted); return; }
+    }
+  }
+  const p=openBlankPopup(npc.name, {});
+  const pad=18, cw0=p.pw-pad*2;
+  // 肖像
+  // 好感
+  const g=state.goodwill[id]||0;
+  const fi=favorInfo(g);
+  addText(p, npc.role, 0, cw0, COL.sub, 14);
+  addText(p, '好感：'+fi.tier+'  '+fi.value+'/'+fi.max, 0, cw0, COL.text, 15);
+  addBar(p, fi.prog/fi.span, cw0);
+  addGap(p,6);
+  addText(p, '“'+npcQuote(id)+'”', 0, cw0, COL.sub, 13);
+  addGap(p,10);
+
+  // 任务（全部10位NPC统一三段个人剧情任务链）
+  if(NPC_CHAINS[id]){
+    renderChainQuests(id, NPC_CHAINS[id], p, cw0);
+    addGap(p,6);
+  } else {
+    const qid = Object.keys(QUESTS).find(q=>QUESTS[q].npc===id);
+    const q = qid?QUESTS[qid]:null;
+    const qs = qid? (state.quests[qid]||{accepted:false,completed:false}) : null;
+    if(q){
+      if(!qs.accepted){
+        addButton(p,'接取任务：'+q.name, 0, cw0, 34, ()=>{ state.quests[qid]={accepted:true,completed:false}; save(); toast('已接取任务'); openNPC(id); });
+      } else if(!qs.completed){
+        const ok=hasItems(q.req);
+        addText(p,'任务【'+q.name+'】'+q.desc, 0, cw0, COL.text, 13);
+        addText(p, ok?'✓ 背包物品已满足':'✗ 物品不足', 0, cw0, ok?COL.accent2:COL.accent, 13);
+        addButton(p,'提交任务', 0, cw0, 34, ()=>{ submitQuest(id,qid); }, ok);
+      } else {
+        addText(p,'任务【'+q.name+'】已完成', 0, cw0, COL.accent2, 13);
+      }
+      addGap(p,6);
+    }
+  }
+
+  // 翠姐高好感：解锁其他 NPC 送礼偏好提示
+  if(id==='cui' && giftHintsUnlocked()){
+    addGap(p,2);
+    addText(p,'【送礼偏好】游村长喜草药花/厌石木；木伯喜木石；阿溪喜鱼饵鱼竿；小信喜浆果花；许先生喜作物；玲婆婆喜草药花；阿远喜兽皮夹；知书喜稀有种子花；老陶喜石花陶/厌兽皮木。', 0, cw0, COL.sub, 12);
+    addGap(p,4);
+  }
+
+  // 往事/剧情：仅对设有背景的 NPC 开放（普通交谈不触发，需主动聆听）
+  if(NPC_BIO[id]){
+    addGap(p,2);
+    const su=storyUnlocked(id);
+    if(su.shallow||su.mid||su.ultimate){
+      addText(p,'（TA似乎有心事想对你说…）', 0, cw0, COL.sub, 12);
+    }
+    addButton(p,'📜 聆听TA的往事', 0, cw0, 34, ()=>{ openSecret(id); });
+  }
+
+  // 随机委托（通用：全部 11 位 NPC 均有，好感达标可接取，完成后剔除不再刷出）
+  renderRandomQuest(id, p, cw0);
+
+  // 特殊功能（各 NPC 专属）
+  if(id==='granny'){ // 游村长【扩建农田】+ 高好感赠种子肥料
+    const price=50;
+    const can = state.unlockedPlotCount + 10 < map.plotSlots.length+10;
+    addButton(p,'扩建农田（'+price+'金币 → 解锁3块）', 0, cw0, 34, ()=>{
+      if(state.coin<price){ toast('金币不足'); return; }
+      if(state.unlockedPlotCount+3 > map.plotSlots.length){ toast('已达农田上限'); return; }
+      state.coin-=price;
+      for(let i=0;i<3;i++){ const s=map.plotSlots[state.unlockedPlotCount++]; map.plots.push({tx:s.tx,ty:s.ty,stage:'wild',crop:null,watered:false}); map.occupied.add(key(s.tx,s.ty)); }
+      save(); toast('解锁了3块新农田'); openNPC(id);
+    }, can);
+    if(g>=600 && !state.randomGifts.granny){
+      addButton(p,'🎁 领取好感赠礼（种子肥料）', 0, cw0, 34, ()=>{ claimGoodwillGift('granny'); openNPC(id); });
+    }
+  }
+  if(id==='carpenter'){ // 木伯【建筑升级】
+    const price = state.carpenterDiscount? 75 : 100;
+    addButton(p,'建筑升级（'+price+'金币+5石头'+(state.carpenterDiscount?'·已折扣':'')+'）', 0, cw0, 34, ()=>{
+      if(state.coin<price){ toast('金币不足'); return; }
+      if((state.inv.stone||0)<5){ toast('石头不足(需5)'); return; }
+      state.coin-=price; state.inv.stone-=5; if(state.inv.stone<=0) delete state.inv.stone;
+      state.houseLevel++; save(); toast('房屋升级到 Lv.'+state.houseLevel); openNPC(id);
+    });
+  }
+  if(id==='xinxin'){ // 小信【交易商店】+ 查看邮件
+    addButton(p,'📮 查看邮件', 0, cw0, 34, ()=>{ openMail(); });
+  }
+  if(id==='ling'){ // 玲婆婆【草药变卖】+ 高好感赠自制料理
+    if(g>=600 && !state.randomGifts.ling){
+      addButton(p,'🎁 领取好感赠礼（自制料理）', 0, cw0, 34, ()=>{ claimGoodwillGift('ling'); openNPC(id); });
+    }
+  }
+  if(id==='zhishu'){ // 知书【图鉴相关委托】
+    addButton(p,'📖 图鉴委托', 0, cw0, 34, ()=>{ openCodexQuests(); });
+  }
+  const shop=NPC_SHOP[id];
+  if(shop && ((shop.buy&&shop.buy.length)||(shop.sell&&shop.sell.length))){
+    addButton(p,'打开商店', 0, cw0, 34, ()=>{ openShop(id); });
+  }
+  // 通用交互按钮：交谈 / 赠送礼物 / 介绍
+  addButton(p,'💬 交谈', 0, cw0, 34, ()=>{ openNPC(id); });
+  addButton(p,'🎁 赠送礼物', 0, cw0, 34, ()=>{ openGift(id); });
+  addButton(p,'📖 介绍', 0, cw0, 34, ()=>{ openSecret(id); });
+  addButton(p,'关闭', 0, cw0, 30, ()=>{ closePopup(); }, true, COL.sub);
+  finalizePopup(p);
+}
+function submitQuest(npcId, qid){
+  const q=QUESTS[qid];
+  if(!hasItems(q.req)){ toast('物品不足，无法提交'); return; }
+  takeItems(q.req);
+  const r=q.reward;
+  if(r.coins) state.coin+=r.coins;
+  if(r.unlockPlots){
+    for(let i=0;i<r.unlockPlots;i++){ if(state.unlockedPlotCount<map.plotSlots.length){ const s=map.plotSlots[state.unlockedPlotCount++]; map.plots.push({tx:s.tx,ty:s.ty,stage:'wild',crop:null,watered:false}); map.occupied.add(key(s.tx,s.ty)); } }
+  }
+  if(r.items){ for(const k in r.items) addItem(k, r.items[k]); }
+  state.quests[qid]={accepted:true,completed:true};
+  save();
+  toast('任务完成！奖励已发放');
+  openNPC(npcId);
+}
+// 任务链：顺序解锁，好感达档位方可接取；completed 存入 state.quests[id].chainDone
+// 约束：已接取的任务不受好感降级影响（始终可提交）；未接取才受档位门槛限制
+function renderChainQuests(id, chain, p, cw0){
+  let qs=state.quests[id];
+  if(!qs || !qs.chainDone){ qs={chainDone:chain.map(()=>false),accepted:-1}; state.quests[id]=qs; }
+  const g=state.goodwill[id]||0;
+  for(let i=0;i<chain.length;i++){
+    const st=chain[i];
+    if(qs.chainDone[i]){ addText(p,'✓ '+st.name+'（已完成）', 0, cw0, COL.accent2, 13); addGap(p,4); continue; }
+    // 已接取：不受降级影响，始终展示提交
+    if(qs.accepted===i){
+      const ok = st.scene ? sceneReady(st) : hasItems(st.req||{});
+      addText(p,'任务【'+st.name+'】'+st.desc, 0, cw0, COL.text, 13);
+      if(st.scene==='deliver'){
+        const n = qs.deliver? Object.values(qs.deliver).filter(Boolean).length:0;
+        addText(p,'进展：已递交 '+n+'/'+st.targets.length+' 封信', 0, cw0, COL.sub, 12);
+      } else if(st.scene==='interview'){
+        const n = qs.interview? Object.values(qs.interview).filter(Boolean).length:0;
+        addText(p,'进展：已打听 '+n+'/'+st.targets.length+' 位', 0, cw0, COL.sub, 12);
+      } else if(st.scene==='rain_night'){
+        addText(p, ok?'✓ 雨夜已至，可完成':'✗ 需在雨天夜晚找阿溪', 0, cw0, ok?COL.accent2:COL.accent, 13);
+      } else if(st.scene==='edge'){
+        addText(p, ok?'✓ 已抵达村外边缘':'✗ 需前往地图村外边缘', 0, cw0, ok?COL.accent2:COL.accent, 13);
+      } else {
+        addText(p, ok?'✓ 背包物品已满足':'✗ 物品不足', 0, cw0, ok?COL.accent2:COL.accent, 13);
+      }
+      if(st.scene==='deliver'||st.scene==='interview'){
+        addText(p,'（与对应NPC交谈以推进）',0,cw0,COL.sub,12);
+      } else {
+        addButton(p,'提交任务', 0, cw0, 34, ()=>{ submitChainQuest(id,i); }, ok);
+      }
+      addGap(p,4); break;
+    }
+    // 顺序解锁：前一段必须完成
+    if(i>0 && !qs.chainDone[i-1]){ addText(p,'🔒 '+st.name+'（需先完成上一段）',0,cw0,COL.faint,13); addGap(p,4); break; }
+    // 好感档位门槛（仅限制接取）
+    if(g < favorMin(st.tierReq)){
+      addText(p,'🔒 '+st.name+'（好感达'+FAVOR_TIERS[st.tierReq]+'解锁）', 0, cw0, COL.faint, 13); addGap(p,4); break;
+    }
+    addButton(p,'接取任务：'+st.name, 0, cw0, 34, ()=>{
+      qs.accepted=i;
+      if(st.scene==='deliver'){ qs.deliver={}; for(const t of (st.targets||[])) qs.deliver[t]=false; }
+      if(st.scene==='interview'){ qs.interview={}; for(const t of (st.targets||[])) qs.interview[t]=false; }
+      save(); openNPC(id);
+    });
+    addGap(p,4); break;
+  }
+}
+function submitChainQuest(id, i){
+  const st=NPC_CHAINS[id][i];
+  let qs=state.quests[id];
+  if(!qs || !qs.chainDone){ qs={chainDone:NPC_CHAINS[id].map(()=>false),accepted:-1}; state.quests[id]=qs; }
+  if(qs.chainDone[i]) return;
+  if(!hasItems(st.req||{})){ toast('物品不足，无法提交'); return; }
+  takeItems(st.req||{});
+  const r=st.reward||{};
+  qs.chainDone[i]=true; qs.accepted=-1;   // 先解锁后发奖：铺垫任务完成后至交上限(999)才开放
+  if(r.coins) state.coin+=r.coins;
+  if(r.items){ for(const k in r.items) addItem(k, r.items[k]); }
+  if(r.favor) addFavor(id, r.favor);
+  if(r.plots) grantPlots(r.plots);
+  if(r.discount) state.carpenterDiscount=true;
+  save();
+  // 终段完成 → 一次性至交专属馈赠（仅文档5位NPC）
+  const isLast = (i===NPC_CHAINS[id].length-1);
+  if(isLast && NPC_SECRET[id] && NPC_SECRET[id].reward && !state.endingClaimed[id]){
+    const e=NPC_SECRET[id].reward;
+    if(e.coins) state.coin+=e.coins;
+    if(e.items){ for(const k in e.items) addItem(k, e.items[k]); }
+    state.endingClaimed[id]=true;
+    toast(npcName(id)+' 向你赠予了专属馈赠');
+  } else {
+    toast('任务完成！奖励已发放');
+  }
+  openNPC(id);
+}
+
+/* ============ 随机委托任务系统（逻辑） ============ */
+function randomQuestState(id){ if(!state.randomQuests[id]) state.randomQuests[id]={active:null,done:{}}; return state.randomQuests[id]; }
+// 可接取的委托：无进行中 + 好感达标 + 未完成 → 随机挑一个（任务完成即从池剔除，不再刷出）
+function randomQuestAvailable(id){
+  const rq=randomQuestState(id);
+  if(rq.active) return null;
+  const g=state.goodwill[id]||0, idx=favorInfo(g).idx;
+  const pool=(RANDOM_QUESTS[id]||[]).filter(t=>!rq.done[t.id] && idx>=t.minTier);
+  if(!pool.length) return null;
+  return pool[Math.floor(Math.random()*pool.length)];
+}
+function acceptRandomQuest(id){
+  const rq=randomQuestState(id);
+  if(rq.active){ toast('已有进行中的委托，先完成它吧'); return; }
+  const t=randomQuestAvailable(id);
+  if(!t){ toast('暂时没有可接取的委托'); return; }
+  rq.active=t.id; save(); toast('已接取委托：'+t.name);
+}
+function submitRandomQuest(id){
+  const rq=randomQuestState(id);
+  if(!rq.active){ toast('没有进行中的委托'); return; }
+  const t=(RANDOM_QUESTS[id]||[]).find(x=>x.id===rq.active);
+  if(!t){ rq.active=null; save(); return; }
+  if(!hasItems(t.req)){ toast('物品不足，无法提交'); return; }
+  takeItems(t.req);
+  if(t.reward.coins) state.coin+=t.reward.coins;
+  if(t.reward.items){ for(const k in t.reward.items) addItem(k, t.reward.items[k]); }
+  rq.done[t.id]=true; rq.active=null; save();
+  toast('委托完成！奖励已发放');
+}
+// NPC 交谈界面渲染随机委托区块
+function renderRandomQuest(id, p, cw0){
+  const pool=RANDOM_QUESTS[id]||[];
+  if(!pool.length) return;
+  const rq=randomQuestState(id);
+  addDivider(p, cw0); addGap(p,4);
+  addText(p,'【委托】', 0, cw0, COL.accent, 14);
+  if(rq.active){
+    const t=pool.find(x=>x.id===rq.active);
+    if(t){
+      addText(p, t.name+'：'+t.desc, 0, cw0, COL.text, 13);
+      const ok=hasItems(t.req);
+      addText(p, ok?'✓ 背包物品已满足':'✗ 物品不足', 0, cw0, ok?COL.accent2:COL.accent, 13);
+      addButton(p,'提交委托', 0, cw0, 32, ()=>{ submitRandomQuest(id); openNPC(id); }, ok);
+    }
+  } else {
+    const av=randomQuestAvailable(id);
+    if(av){
+      addText(p,'📋 有委托可以领取！', 0, cw0, COL.accent, 13);
+      addButton(p,'接取委托：'+av.name, 0, cw0, 32, ()=>{ acceptRandomQuest(id); openNPC(id); });
+    } else {
+      const todo=pool.filter(t=>!rq.done[t.id]);
+      if(todo.length===0){ addText(p,'所有委托都已完成 ✨', 0, cw0, COL.sub, 12); }
+      else { addText(p,'好感达标后可领取新的委托', 0, cw0, COL.sub, 12); }
+    }
+  }
+  addGap(p,4);
+}
+// 好感解锁的商店购买项（追加到基础 buy 列表）
+function shopBuyList(id){
+  const base=(NPC_SHOP[id]&&NPC_SHOP[id].buy)||[];
+  const g=state.goodwill[id]||0, idx=favorInfo(g).idx;
+  const list=base.slice();
+  const push=(item,price,name)=>{ if(!list.some(x=>x.item===item)) list.push({item,price,name}); };
+  if(id==='you'){          // 许先生杂货商店：好感解锁高级种子
+    if(idx>=3) push('rare_seed', 120, '稀有种子');    // 亲近
+    if(idx>=4) push('mystery_seed', 90, '神秘种子');  // 投缘
+  }
+  if(id==='yuan'){         // 阿远物资交换：好感解锁更多稀有道具
+    if(idx>=3) push('rare_seed', 100, '稀有种子');
+    if(idx>=4) push('mystery_seed', 90, '神秘种子');
+  }
+  if(id==='cui'){          // 翠姐酒馆：好感解锁高级料理
+    if(idx>=3) push('fish_soup', 55, '鱼汤');
+    if(idx>=4) push('stew', 75, '炖菜');
+  }
+  return list;
+}
+// 高好感一次性赠礼（种子肥料/自制料理/小采集物）
+function claimGoodwillGift(id){
+  const G={
+    granny:{ min:600, items:{wheat_seed:3, fertilizer:2}, text:'游村长把一包种子和肥料塞给你。' },
+    ling:{   min:600, items:{dish:1, herb:2}, text:'玲婆婆递给你一份自制料理。' },
+    ale:{    min:900, items:{berry:2, flower:1}, text:'阿乐把自己摘的小果子分给你。' },
+    wan:{    min:900, items:{mushroom:2, iceflower:1}, text:'小晚把捉到的小东西送给你。' },
+  };
+  const gv=G[id]; if(!gv) return;
+  if(state.randomGifts[id]){ toast('这份赠礼你已经收过了'); return; }
+  if((state.goodwill[id]||0)<gv.min){ toast('好感还不够高'); return; }
+  for(const k in gv.items) addItem(k, gv.items[k]);
+  state.randomGifts[id]=true; save(); toast(gv.text);
+}
+// 小信【查看邮件】：展示小镇来信（纯展示，无副作用）
+function openMail(){
+  const p=openBlankPopup('邮件 · 小信', {});
+  const pad=18, cw0=p.pw-pad*2;
+  const mails=[
+    '【镇上来信】商会希望村子供应一批小麦，许先生的杂货铺正在收。',
+    '【翠姐的酒馆】缺几条鲜鲈鱼，钓到了可以卖给她。',
+    '【游村长】村外的木桥要加固，可能需要很多木头。',
+    '【知书】他托我留意镇上的旧书摊，有残页记得带给他。',
+  ];
+  for(const m of mails){ addText(p,'✉ '+m,0,cw0,COL.text,13); addGap(p,6); }
+  addButton(p,'关闭', 0, cw0, 30, ()=>{ closePopup(); }, true, COL.sub);
+  finalizePopup(p);
+}
+// 知书【图鉴相关委托】：物品收集图鉴固定任务，稀有道具奖励（一次性，完成不入随机池）
+const CODEX_QUESTS = [
+  {id:'cz1', name:'残页归册', desc:'收集 3 份古籍残页', req:{page:3}, reward:{items:{rare_seed:1}}},
+  {id:'cz2', name:'古陶入档', desc:'收集 3 片古陶碎片', req:{pottery:3}, reward:{items:{fertilizer:2}}},
+  {id:'cz3', name:'遗物归库', desc:'收集 3 件河底遗物', req:{relic:3}, reward:{items:{mystery_seed:1}}},
+  {id:'cz4', name:'藤蔓书签', desc:'收集 10 根藤蔓', req:{vine:10}, reward:{coins:150}},
+];
+function openCodexQuests(){
+  const p=openBlankPopup('图鉴委托 · 知书', {});
+  const pad=18, cw0=p.pw-pad*2;
+  addText(p,'知书在整理村中图鉴，需要你帮忙收集稀有标本：', 0, cw0, COL.sub, 13); addGap(p,8);
+  for(const t of CODEX_QUESTS){
+    const qs=state.quests[t.id]||{accepted:false,completed:false};
+    addText(p,'【'+t.name+'】'+t.desc, 0, cw0, COL.text, 14);
+    if(qs.completed){
+      addText(p,'✓ 已完成', 0, cw0, COL.accent2, 12);
+    } else {
+      const ok=hasItems(t.req);
+      addText(p, ok?'✓ 背包物品已满足':'✗ 物品不足', 0, cw0, ok?COL.accent2:COL.accent, 12);
+      addButton(p,'提交', cw0-82, 82, 30, ()=>{
+        if(!hasItems(t.req)){ toast('物品不足'); return; }
+        takeItems(t.req);
+        if(t.reward.coins) state.coin+=t.reward.coins;
+        if(t.reward.items){ for(const k in t.reward.items) addItem(k, t.reward.items[k]); }
+        state.quests[t.id]={accepted:true,completed:true}; save();
+        toast('图鉴任务完成！稀有奖励已发放'); openCodexQuests();
+      }, ok);
+    }
+    addGap(p,4);
+  }
+  addButton(p,'返回', 0, cw0, 30, ()=>{ openNPC('zhishu'); }, true, COL.sub);
+  finalizePopup(p);
+}
+
+function openShop(id){
+  const shop=NPC_SHOP[id]||{};
+  const titleMap={you:'杂货商店 · 许先生',axi:'渔具商店 · 阿溪',xinxin:'交易商店 · 小信',ling:'草药变卖 · 玲婆婆',yuan:'物资交换 · 阿远',zhishu:'知书',cui:'酒馆 · 翠姐',tao:'陶坊 · 老陶'};
+  const p=openBlankPopup(titleMap[id]||('商店 · '+id), {});
+  const pad=18, cw0=p.pw-pad*2;
+  addText(p,'金币：'+state.coin, 0, cw0, COL.text, 15);
+  addGap(p,8);
+  // 购买（含好感解锁项）
+  const buyList=shopBuyList(id);
+  if(buyList.length){
+    addText(p,'— 购买 / 交换 —', 0, cw0, COL.sub, 13); addGap(p,4);
+    for(const it of buyList){
+      const owned=state.inv[it.item]||0;
+      addText(p, it.name+'  (持有'+owned+')', 0, cw0-90, COL.text, 14);
+      addButton(p, it.price+'金', cw0-82, 82, 30, ()=>{
+        if(state.coin<it.price){ toast('金币不足'); return; }
+        state.coin-=it.price; addItem(it.item,1); save(); toast('购买 '+ITEMS[it.item].name); openShop(id);
+      });
+      addGap(p,4);
+    }
+  }
+  // 出售
+  if(shop.sell && shop.sell.length){
+    addText(p,'— 出售 —', 0, cw0, COL.sub, 13); addGap(p,4);
+    for(const it of shop.sell){
+      const owned=state.inv[it.item]||0;
+      addText(p, it.name+'  (持有'+owned+')', 0, cw0-90, COL.text, 14);
+      addButton(p, '+'+it.price+'金', cw0-82, 82, 30, ()=>{
+        if(owned<=0){ toast('没有可出售的'+ITEMS[it.item].name); return; }
+        state.inv[it.item]--; if(state.inv[it.item]<=0) delete state.inv[it.item];
+        state.coin+=it.price; save(); toast('出售 '+ITEMS[it.item].name); openShop(id);
+      }, owned>0);
+      addGap(p,4);
+    }
+  }
+  addButton(p,'返回', 0, cw0, 30, ()=>{ openNPC(id); }, true, COL.sub);
+  finalizePopup(p);
+}
+
+// 赠送礼物：扣除背包物品并正确累加好感；若已达当前上限（未完成任务则锁定知己上限），
+// 不再消耗礼物，避免“物品消失好感不动”。返回 true=已赠送并累加，false=被上限拦截。
+function tryGiveGift(id, k){
+  const npc=map.npcs.find(n=>n.id===id);
+  // 料理不能送礼（全局规则）
+  if(GIFT_BLOCKED[k]){ toast('料理不能作为礼物赠送'); return false; }
+  const pref=NPC_GIFT[id];
+  let inc;
+  if(pref && pref.like && pref.like.indexOf(k)>=0) inc=12;
+  else if(pref && pref.dislike && pref.dislike.indexOf(k)>=0) inc=-6;
+  else inc = (k==='flower'||k==='berry')?8: (k.indexOf('seed')>=0?3:5);
+  const before = state.goodwill[id]||0;
+  // 上限保护：好感已达当前上限时，赠送不再消耗物品（厌恶-好感除外，仍可降低）
+  if(inc>0 && before >= favorCap(id)){
+    toast('TA对你的好感已达当前上限，完成TA的专属任务后可继续增进~');
+    return false;
+  }
+  state.inv[k] = (state.inv[k]||0) - 1; if(state.inv[k]<=0) delete state.inv[k];
+  addFavor(id, inc);
+  save();
+  toast(inc>=0? ('好感 +'+inc) : ('好感 '+inc));
+  return true;
+}
+
+function openGift(id){
+  const p=openBlankPopup('送礼 · '+(map.npcs.find(n=>n.id===id).name), {});
+  const pad=18, cw0=p.pw-pad*2;
+  const pref=NPC_GIFT[id];
+  const showPref = giftHintsUnlocked();
+  const ids=invIds();
+  if(ids.length===0){ addText(p,'背包里没有可赠送的物品',0,cw0,COL.sub,14); }
+  else{
+    addText(p,'点击物品赠送给TA（喜好+好感，厌恶-好感；料理不可赠送）',0,cw0,COL.sub,13); addGap(p,6);
+    for(const k of ids){
+      if(GIFT_BLOCKED[k]) continue;
+      let tag='';
+      if(pref){
+        if(pref.like && pref.like.indexOf(k)>=0) tag=' ♥';
+        else if(pref.dislike && pref.dislike.indexOf(k)>=0) tag=' ✗';
+      }
+      addText(p, ITEMS[k].name+' x'+state.inv[k]+tag, 0, cw0-90, COL.text, 14);
+      addButton(p,'赠送', cw0-82, 82, 30, ()=>{
+        tryGiveGift(id, k);
+        openGift(id);
+      });
+      addGap(p,4);
+    }
+  }
+  if(showPref && pref){
+    addGap(p,4);
+    const like=(pref.like||[]).map(k=>ITEMS[k]?ITEMS[k].name:k).join('、');
+    const dis=(pref.dislike||[]).map(k=>ITEMS[k]?ITEMS[k].name:k).join('、');
+    addText(p,'偏好：喜欢 '+like+'；讨厌 '+dis, 0, cw0, COL.sub, 12);
+  }
+  addButton(p,'返回', 0, cw0, 30, ()=>{ openNPC(id); }, true, COL.sub);
+  finalizePopup(p);
+}
+
+// 秘辛往事弹窗：按好感分层展示已解锁内容，未解锁显示 ??? 提示对应等级
+function openSecret(id){
+  const npc=map.npcs.find(n=>n.id===id);
+  const p=openBlankPopup('往事 · '+(npc?npc.name:id), {});
+  const pad=18, cw0=p.pw-pad*2;
+  const g=state.goodwill[id]||0;
+  const fi=favorInfo(g);
+  const S=NPC_SECRET[id];
+  if(S){
+    addText(p, S.base, 0, cw0, COL.sub, 13); addGap(p,8);
+    const qs=state.quests[id];
+    const su=storyUnlocked(id);
+    // 浅层往事（友好）
+    if(su.shallow){ addText(p,'〔浅层往事·友好〕',0,cw0,COL.accent,13); addText(p,S.shallow,0,cw0,COL.text,13); addGap(p,4); }
+    else { addText(p,'〔浅层往事〕？？？（好感达友好解锁）',0,cw0,COL.faint,13); addGap(p,4); }
+    // 阶段一完成对话
+    if(qs&&qs.chainDone&&qs.chainDone[0]){ addText(p,'〔纪念之后〕',0,cw0,COL.accent,13); addText(p,S.s1done,0,cw0,COL.text,13); addGap(p,4); }
+    // 中层过往（投缘 + 阶段一完成）
+    if(su.mid){ addText(p,'〔中层过往·投缘〕',0,cw0,COL.accent,13); addText(p,S.mid,0,cw0,COL.text,13); addGap(p,4); }
+    else { addText(p,'〔中层过往〕？？？（好感达投缘且完成阶段一解锁）',0,cw0,COL.faint,13); addGap(p,4); }
+    // 阶段二完成对话
+    if(qs&&qs.chainDone&&qs.chainDone[1]){ addText(p,'〔修缮之后〕',0,cw0,COL.accent,13); addText(p,S.s2done,0,cw0,COL.text,13); addGap(p,4); }
+    // 铺垫对话（知己：已接取或已完成阶段三）
+    if((qs&&qs.chainDone&&qs.chainDone[2]) || (qs&&qs.accepted===2)){ addText(p,'〔铺垫·知己〕',0,cw0,COL.accent,13); addText(p,S.foreshadow,0,cw0,COL.text,13); addGap(p,4); }
+    // 终极秘辛（至交）
+    if(su.ultimate){ addText(p,'〔终极秘辛·至交〕',0,cw0,COL.accent,13); addText(p,S.ultimate,0,cw0,COL.text,13); addGap(p,4); }
+    else if(g>=900){ addText(p,'〔终极秘辛〕？？？（需完成铺垫任务）',0,cw0,COL.faint,13); addGap(p,4); }
+    else { addText(p,'〔终极秘辛〕？？？（好感达至交解锁）',0,cw0,COL.faint,13); addGap(p,4); }
+    // 至交专属馈赠
+    if(endingUnlocked(id)){
+      addGap(p,4);
+      addText(p,'〔专属馈赠〕'+S.ending, 0, cw0, COL.sub, 13);
+      if(!state.endingClaimed[id]){
+        addButton(p,'领取TA的专属馈赠', 0, cw0, 34, ()=>{
+          const r=S.reward;
+          if(r.coins) state.coin+=r.coins;
+          if(r.items){ for(const k in r.items) addItem(k, r.items[k]); }
+          state.endingClaimed[id]=true; save();
+          toast(npc.name+'向你赠予了专属馈赠'); openSecret(id);
+        });
+      } else {
+        addText(p,'（专属馈赠已领取）', 0, cw0, COL.faint, 12);
+      }
+    }
+  } else {
+    // 非文档NPC：保留原有按好感累计的背景文本
+    const bio=NPC_BIO[id];
+    if(!bio){ addButton(p,'返回',0,cw0,30,()=>{openNPC(id);},true,COL.sub); finalizePopup(p); return; }
+    addText(p, npc.name+'的往事会随好感加深而层层揭开。', 0, cw0, COL.sub, 13);
+    addGap(p,8);
+    for(let t=0; t<=fi.idx && t<bio.length; t++){
+      addText(p, (t>0?('〔'+FAVOR_TIERS[t]+'〕'):'〔初识〕')+bio[t], 0, cw0, (t===fi.idx?COL.text:COL.sub), 13);
+      addGap(p,4);
+    }
+  }
+  addButton(p,'返回', 0, cw0, 30, ()=>{ openNPC(id); }, true, COL.sub);
+  finalizePopup(p);
+}
+
+// 全局结局：仅当集齐全部10位NPC至交+支线后，由玩家视角拼合“千年古农田遗迹”完整真相，并揭开许先生真实动机
+// 任何单个NPC都不会讲出完整故事——真相只在这些拼合起来的实物碎片里。
+function openMainStory(){
+  if(!allSecretsComplete()){ toast('线索尚未集齐'); return; }
+  if(!state.mainStoryUnlocked){ state.mainStoryUnlocked=true; save(); }
+  const p=openBlankPopup('主线 · 千年古农田遗迹', {});
+  const pad=18, cw0=p.pw-pad*2;
+  addText(p,'你终于集齐了十位村民各自交出的那一块碎片。没有人知道全部，但当它们拼在一起，沉默的土地第一次向你开口——', 0, cw0, COL.sub, 13);
+  addGap(p,8);
+  addText(p,'〔拼合出的真相〕', 0, cw0, COL.accent, 13);
+  addText(p,'千年之前，这片土地曾有先民聚居农耕，留下成片的农田、沟渠、陶器与居所。一场地质变动将整座聚落缓缓掩埋于地层之下，连同它的名字，一同被世人遗忘。', 0, cw0, COL.text, 13);
+  addGap(p,4);
+  addText(p,'十年前的山洪搅动了地层，把这些沉睡的碎片冲出地表——陶片、古木、石器、兽骨、残卷，散落在田地、山林与河岸。每一片都只是真相的一角：', 0, cw0, COL.text, 13);
+  addGap(p,4);
+  addText(p,'· 游村长与老陶手中的陶土残片、带花纹古陶残片，出自同一制陶体系，印证这里曾有一座烧陶的聚落；', 0, cw0, COL.text, 13);
+  addText(p,'· 木伯地基里挖出的古木构件，工艺不属当代，是当年农舍与农具的遗存；', 0, cw0, COL.text, 13);
+  addText(p,'· 玲婆婆守着的那几片“特殊土层”，正是被掩埋的古农田耕作层——怪草只长在那里，因为它记得从前的泥土；', 0, cw0, COL.text, 13);
+  addText(p, '· 知书残卷里那句“古有农人聚居”，是史册对这片土地仅存的记载；', 0, cw0, COL.text, 13);
+  addText(p,'· 阿溪从不离身的玉佩，纹样与古陶暗合，似在暗示她与这座千年聚落，或许血脉相连；', 0, cw0, COL.text, 13);
+  addText(p,'· 阿远所指山林中的旧石器与兽骨，是当年先民生活与狩猎的遗痕；', 0, cw0, COL.text, 13);
+  addText(p,'· 而翠姐听来的流言、小信见过的他乡古村，都只是旁证与误会，拼不出现实的半点全貌——真相，只在那些冰冷的实物里。', 0, cw0, COL.text, 13);
+  addGap(p,8);
+  addText(p,'〔许先生 · 真实的他〕', 0, cw0, COL.accent, 13);
+  addText(p,'直到此刻，你才真正看清那个温和的外乡人。许先生确是为寻访东方古老农耕文明而来——祖辈古籍里记载的“古老农耕土地”，正是脚下这片被遗忘的遗迹。多年来，他始终伪装成普通的杂货商人，连村里人无一看破。如今碎片拼全，他才向你卸下伪装：多年潜伏，只为印证祖辈的遗愿。但他郑重言明，无意掠夺，也无心惊动村子，只愿让被埋千年的农耕文明，重见天日。', 0, cw0, COL.text, 13);
+  addGap(p,8);
+  addText(p,'没有人能讲出完整的故事。是你将十块拼图拼在了一起——这，便是只属于你的古农田遗迹。', 0, cw0, COL.sub, 13);
+  addGap(p,6);
+  addButton(p,'合上这段历史', 0, cw0, 34, ()=>{ closePopup(); }, true, COL.sub);
+  finalizePopup(p);
+}
+
+/* ================= 弹窗系统 ================= */
+let currentPopup=null;
+function openBlankPopup(title, opts){
+  // 同时间仅允许1个弹窗：直接覆盖
+  const pw=Math.min(680, cw-40);
+  const ph=Math.min(520, ch-60);
+  const p={
+    title, items:[], tabs:null, activeTab:0, scrollY:0, scrollMax:0,
+    px:0,py:0,pw,ph, titleH:50, tabsH:0, _cy:0, data:opts&&opts.data||{},
+  };
+  currentPopup=p;
+  return p;
+}
+function closePopup(){ currentPopup=null; }
+function addText(p, text, x, w, color, size){
+  setFont(size||14, false);
+  const lines=wrapText(text, w);
+  const lh=(size||14)+6;
+  const h=lines.length*lh;
+  p.items.push({type:'text', x, y:p._cy, w, lines, color:color||COL.text, size:size||14, h});
+  p._cy+=h+4;
+}
+function addBar(p, ratio, w){
+  p.items.push({type:'bar', x:0, y:p._cy, w, ratio:clamp(ratio,0,1), h:14});
+  p._cy+=18;
+}
+function addButton(p, label, x, w, h, action, enabled, color){
+  p.items.push({type:'button', x, y:p._cy, w, h:h||30, label, action, enabled:enabled!==false, color:color||COL.accent});
+  p._cy+= (h||30)+8;
+}
+function addGap(p,g){ p._cy+=g; }
+function addDivider(p, w, color){
+  p.items.push({type:'divider', x:0, y:p._cy, w, color:color||'#D8C3A0', h:1});
+  p._cy+=16;
+}
+function finalizePopup(p){ /* 占位：scrollMax 在绘制时计算 */ }
+
+function handlePopupClick(mx,my){
+  const p=currentPopup; if(!p) return;
+  const pad=18;
+  const px=(cw-p.pw)/2, py=(ch-p.ph)/2, pw=p.pw, ph=p.ph;
+  p.px=px; p.py=py;
+  // 关闭叉
+  if(mx>=px+pw-40 && mx<=px+pw-14 && my>=py+14 && my<=py+40){ closePopup(); return; }
+  // tabs
+  if(p.tabs){
+    const tw=(pw-pad*2)/p.tabs.length;
+    for(let i=0;i<p.tabs.length;i++){
+      const tx=px+pad+i*tw;
+      if(mx>=tx&&mx<=tx+tw-6&&my>=py+p.titleH+6&&my<=py+p.titleH+34){
+        if(p.activeTab!==i){ p.activeTab=i; p.scrollY=0; if(p.onTab) p.onTab(i); }
+        return;
+      }
+    }
+  }
+  // 内容按钮（叠加滚动偏移）
+  const top=py+p.titleH+p.tabsH+pad;
+  const localY = my - top + p.scrollY;
+  for(const it of p.items){
+    if(it.type!=='button') continue;
+    if(mx>=px+pad+it.x && mx<=px+pad+it.x+it.w && localY>=it.y && localY<=it.y+it.h){
+      if(it.enabled!==false) it.action();
+      return;
+    }
+  }
+}
+
+function drawPopup(){
+  const p=currentPopup; if(!p) return;
+  const pad=18;
+  const px=(cw-p.pw)/2, py=(ch-p.ph)/2;
+  p.px=px; p.py=py;
+  // 遮罩
+  ctx.fillStyle=COL.mask; ctx.fillRect(0,0,cw,ch);
+  // 面板
+  rr(ctx,px,py,p.pw,p.ph,18); ctx.fillStyle=COL.panel; ctx.fill();
+  ctx.lineWidth=3; ctx.strokeStyle=COL.border; ctx.stroke();
+  // 标题
+  setFont(20,true); ctx.fillStyle=COL.text; ctx.textAlign='left';
+  ctx.fillText(p.title, px+pad, py+34);
+  ctx.textAlign='left';
+  // 关闭叉
+  ctx.strokeStyle=COL.sub; ctx.lineWidth=3;
+  const cx=px+p.pw-27, cy=py+27;
+  ctx.beginPath(); ctx.moveTo(cx-7,cy-7); ctx.lineTo(cx+7,cy+7); ctx.moveTo(cx+7,cy-7); ctx.lineTo(cx-7,cy+7); ctx.stroke();
+  // tabs
+  if(p.tabs){
+    const tw=(p.pw-pad*2)/p.tabs.length;
+    for(let i=0;i<p.tabs.length;i++){
+      const tx=px+pad+i*tw, ty=py+p.titleH+6, th=28;
+      rr(ctx,tx,ty,tw-6,th,8);
+      ctx.fillStyle = (i===p.activeTab)?COL.accent:COL.barBg;
+      ctx.fill();
+      setFont(14, i===p.activeTab); ctx.fillStyle = (i===p.activeTab)?'#fff':COL.text;
+      ctx.textAlign='center';
+      ctx.fillText(p.tabs[i], tx+(tw-6)/2, ty+19);
+      ctx.textAlign='left';
+    }
+    p.tabsH=40;
+  } else p.tabsH=0;
+
+  const top=py+p.titleH+p.tabsH+pad;
+  const clipH = p.ph - p.titleH - p.tabsH - pad*2;
+  const contentH=p._cy;
+  p.scrollMax=Math.max(0, contentH-clipH);
+
+  ctx.save();
+  rr(ctx, px+pad, top, p.pw-pad*2, clipH, 8); ctx.clip();
+  for(const it of p.items){
+    const iy = top + it.y - p.scrollY;
+    if(iy+it.h<top || iy>top+clipH) continue;
+    const ix = px+pad+it.x;
+    if(it.type==='text'){
+      setFont(it.size,false); ctx.fillStyle=it.color; ctx.textAlign='left';
+      for(let i=0;i<it.lines.length;i++){ ctx.fillText(it.lines[i], ix, iy+it.size+i*(it.size+6)); }
+    } else if(it.type==='bar'){
+      rr(ctx, ix, iy, it.w, it.h, 6); ctx.fillStyle=COL.barBg; ctx.fill();
+      rr(ctx, ix, iy, it.w*it.ratio, it.h, 6); ctx.fillStyle=COL.accent2; ctx.fill();
+    } else if(it.type==='divider'){
+      ctx.strokeStyle=it.color; ctx.lineWidth=1;
+      ctx.beginPath(); ctx.moveTo(ix, iy+it.h/2); ctx.lineTo(ix+it.w, iy+it.h/2); ctx.stroke();
+    } else if(it.type==='button'){
+      const hover = mouseX>=ix&&mouseX<=ix+it.w&&mouseY>=iy&&mouseY<=iy+it.h;
+      rr(ctx, ix, iy, it.w, it.h, 8);
+      ctx.fillStyle = it.enabled===false? '#D8CDB5' : (hover? shade(it.color,-12): it.color);
+      ctx.fill();
+      ctx.lineWidth=2; ctx.strokeStyle=COL.border; ctx.stroke();
+      setFont(14,true); ctx.fillStyle = it.enabled===false? COL.faint : '#fff';
+      ctx.textAlign='center'; ctx.fillText(it.label, ix+it.w/2, iy+it.h/2+5);
+      ctx.textAlign='left';
+    } else if(it.type==='codex'){
+      rr(ctx, ix, iy, it.w, it.w, 8); ctx.fillStyle='#fff'; ctx.fill();
+      ctx.lineWidth=1.5; ctx.strokeStyle=COL.border; ctx.stroke();
+      if(it.discovered){ drawItemIcon(it.id, ix+4, iy+4, it.w-8); }
+      else { setFont(20,true); ctx.fillStyle=COL.faint; ctx.textAlign='center'; ctx.fillText('?', ix+it.w/2, iy+it.w/2+7); ctx.textAlign='left'; }
+      setFont(11,false); ctx.fillStyle=COL.sub; ctx.textAlign='center';
+      ctx.fillText(it.discovered?ITEMS[it.id].name:'未解锁', ix+it.w/2, iy+it.w+15); ctx.textAlign='left';
+    } else if(it.type==='map'){
+      const mw=it.w, mh=it.h;
+      const sxk=mw/MAP_W, syk=mh/MAP_H;
+      ctx.save(); rr(ctx, ix, iy, mw, mh, 6); ctx.clip();
+      ctx.fillStyle=COL.grassA; ctx.fillRect(ix,iy,mw,mh);
+      // 道路
+      ctx.fillStyle=COL.road;
+      map.road.forEach(k=>{ const a=k.split(','); ctx.fillRect(ix+(+a[0])*sxk, iy+(+a[1])*syk, Math.ceil(sxk)+1, Math.ceil(syk)+1); });
+      // 水域
+      ctx.fillStyle=COL.water;
+      map.water.forEach(k=>{ const a=k.split(','); ctx.fillRect(ix+(+a[0])*sxk, iy+(+a[1])*syk, Math.ceil(sxk)+1, Math.ceil(syk)+1); });
+      // 中央广场（瓷砖硬地）
+      ctx.fillStyle=COL.plaza;
+      map.plaza.forEach(k=>{ const a=k.split(','); ctx.fillRect(ix+(+a[0])*sxk, iy+(+a[1])*syk, Math.ceil(sxk)+1, Math.ceil(syk)+1); });
+      // 中央广场（瓷砖硬地）— 区域名已统一为"望月中央广场"，不再单独标注
+      // 农田位置（用户新规范：与四周各隔 1 格）— 棕色虚线框
+      if(map.farmRects){
+        ctx.strokeStyle='rgba(160,120,60,0.85)'; ctx.lineWidth=1.5; ctx.setLineDash([3,2]);
+        for(const R of map.farmRects){ ctx.strokeRect(ix+R.x*sxk, iy+R.y*syk, R.w*sxk, R.h*syk); }
+        ctx.setLineDash([]);
+      }
+      // 动物围栏（深棕实线框 + 上方 3 格入口留白）
+      if(map.fenceRects){
+        const R=map.fenceRects[0];
+        ctx.strokeStyle='rgba(120,80,40,0.85)'; ctx.lineWidth=2;
+        // 上方三格入口断开（用三段横线代替）
+        ctx.beginPath(); ctx.moveTo(ix+R.x*sxk, iy+R.y*syk); ctx.lineTo(ix+14*sxk, iy+R.y*syk); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(ix+17*sxk, iy+R.y*syk); ctx.lineTo(ix+(R.x+R.w)*sxk, iy+R.y*syk); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(ix+R.x*sxk, iy+R.y*syk); ctx.lineTo(ix+R.x*sxk, iy+(R.y+R.h)*syk); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(ix+(R.x+R.w)*sxk, iy+R.y*syk); ctx.lineTo(ix+(R.x+R.w)*sxk, iy+(R.y+R.h)*syk); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(ix+R.x*sxk, iy+(R.y+R.h)*syk); ctx.lineTo(ix+(R.x+R.w)*sxk, iy+(R.y+R.h)*syk); ctx.stroke();
+        // 上方入口高亮
+        ctx.fillStyle='rgba(255,210,80,0.55)';
+        ctx.fillRect(ix+14*sxk, iy+(R.y-0.3)*syk, 3*sxk, syk*0.6);
+      }
+      // 农田/围栏 文字标注
+      setFont(9,true); ctx.fillStyle='rgba(100,70,30,0.85)';
+      if(map.farmRects){ ctx.fillText('◌ 农田', ix+5*sxk+2, iy+32*syk+10); }
+      if(map.fenceRects){ ctx.fillText('▣ 动物围栏', ix+10*sxk+2, iy+49*syk+10); }
+      // 建筑 + 名称标记
+      for(const b of map.buildings){
+        ctx.fillStyle=COL.accent;
+        ctx.fillRect(ix+b.tx*sxk, iy+b.ty*syk, b.tw*sxk, b.th*syk);
+        setFont(8,true); ctx.fillStyle='rgba(40,28,16,0.9)';
+        ctx.textAlign='center';
+        ctx.fillText(b.mapName||b.label, ix+(b.tx+b.tw/2)*sxk, iy+b.ty*syk-2);
+      }
+      ctx.textAlign='left';
+      // 遗迹三角（未发现=灰色模糊，已发现=金色高亮）
+      for(const r of map.relics){
+        const cx=ix+(r.tx+0.5)*sxk, cy=iy+(r.ty+0.5)*syk, found=!!state.relics[r.id];
+        ctx.beginPath(); ctx.moveTo(cx,cy-5); ctx.lineTo(cx-4,cy+4); ctx.lineTo(cx+4,cy+4); ctx.closePath();
+        ctx.fillStyle= found? '#E8B84B' : 'rgba(120,120,120,0.5)'; ctx.fill();
+      }
+      // NPC 彩色圆点（实时位置）
+      for(const n of map.npcs){
+        ctx.fillStyle=n.color;
+        const cx=ix+(n.x/TILE)*sxk, cy=iy+(n.y/TILE)*syk;
+        ctx.beginPath(); ctx.arc(cx, cy, 3, 0, 6.28); ctx.fill();
+        ctx.lineWidth=1; ctx.strokeStyle='rgba(255,255,255,0.75)'; ctx.stroke();
+      }
+      // 玩家箭头（橙色，指向朝向）
+      const px0=ix+(state.px/TILE)*sxk, py0=iy+(state.py/TILE)*syk;
+      ctx.save(); ctx.translate(px0,py0);
+      const ang={up:-Math.PI/2, down:Math.PI/2, left:Math.PI, right:0}[state.dir]||0;
+      ctx.rotate(ang);
+      ctx.fillStyle='#FF8A1E';
+      ctx.beginPath(); ctx.moveTo(6,0); ctx.lineTo(-4,-4); ctx.lineTo(-4,4); ctx.closePath(); ctx.fill();
+      ctx.restore();
+      // 八大区域名称（最顶层绘制，覆盖建筑/NPC之上；望月中央广场 26px，其余 32px）
+      const zones=[
+        {name:'石陶谷',       x:0,  y:0,  w:20, h:19, fs:32},
+        {name:'匠作坪',       x:20, y:0,  w:21, h:19, fs:32},
+        {name:'木犀猎岭',     x:41, y:0,  w:33, h:19, fs:32},
+        {name:'闲居坊',       x:0,  y:19, w:20, h:12, fs:32},
+        {name:'望月中央广场', x:20, y:19, w:21, h:12, fs:26},
+        {name:'通衢市井',     x:41, y:19, w:33, h:12, fs:32},
+        {name:'归耕农场',     x:0,  y:31, w:30, h:20, fs:32},
+        {name:'星湖湾',       x:30, y:31, w:44, h:20, fs:32},
+      ];
+      ctx.textAlign='center';
+      for(const z of zones){
+        setFont(z.fs,true);
+        ctx.fillStyle='rgba(255,250,238,0.25)';
+        const cx=ix+(z.x+z.w/2)*sxk, cy=iy+(z.y+z.h/2)*syk;
+        ctx.fillText(z.name, cx, cy+10);
+      }
+      ctx.textAlign='left';
+      ctx.restore();
+      ctx.lineWidth=1.5; ctx.strokeStyle=COL.border; rr(ctx,ix,iy,mw,mh,6); ctx.stroke();
+    }
+  }
+  ctx.restore();
+
+  // 滚动条
+  if(p.scrollMax>0){
+    const sbX=px+p.pw-pad+2, sbW=6;
+    const ratio=clipH/contentH;
+    const thumbH=Math.max(24, clipH*ratio);
+    const thumbY=top + (clipH-thumbH)*(p.scrollY/p.scrollMax);
+    rr(ctx, sbX, top, sbW, clipH, 3); ctx.fillStyle='rgba(200,168,107,0.25)'; ctx.fill();
+    rr(ctx, sbX, thumbY, sbW, thumbH, 3); ctx.fillStyle=COL.border; ctx.fill();
+  }
+  ctx.textAlign='left';
+}
+function shade(hex, amt){
+  // 简单明暗
+  if(hex[0]!=='#') return hex;
+  let r=parseInt(hex.slice(1,3),16), g=parseInt(hex.slice(3,5),16), b=parseInt(hex.slice(5,7),16);
+  r=clamp(r+amt,0,255); g=clamp(g+amt,0,255); b=clamp(b+amt,0,255);
+  return 'rgb('+r+','+g+','+b+')';
+}
+
+/* ================= 附加弹窗：图鉴/帮助/地图/任务/名册 ================= */
+function openCodex(){
+  const p=openBlankPopup('图鉴', {});
+  const pad=18, cw0=p.pw-pad*2;
+  const all=Object.keys(ITEMS).filter(k=>k!=='coin');
+  const found=all.filter(k=>state.codex[k]);
+  addText(p,'已发现 '+found.length+' / '+all.length+' 种物品', 0, cw0, COL.sub, 14); addGap(p,8);
+  const cols=4, sw= (cw0- (cols-1)*10)/cols;
+  let i=0;
+  for(const k of all){
+    const col=i%cols, row=Math.floor(i/cols);
+    const x=col*(sw+10), y=p._cy+row*(sw+34);
+    const discovered=state.codex[k];
+    p.items.push({type:'codex', x, y, w:sw, h:sw+30, id:k, discovered});
+    i++;
+  }
+  p._cy += Math.ceil(all.length/cols)*( (cw0- (cols-1)*10)/cols + 34);
+  finalizePopup(p);
+}
+function openHelp(){
+  const p=openBlankPopup('帮助', {});
+  const pad=18, cw0=p.pw-pad*2;
+  const lines=[
+    '【操作】方向键 / WASD 移动。靠近 NPC 按 E 或点击交谈。',
+    '【农田】走到农田附近，用底部【种植】依次完成 开垦→播种→浇水→收获。浇过水后再睡觉可催熟作物。',
+    '【体力】劳作消耗体力，背包内食用动物产出/野果/草药/鱼类/料理或睡觉恢复。',
+    '【资源】靠近树木用【伐木】、石头用【凿石】、采集物用【采集】、水边用【钓鱼】、动物用【畜牧】。',
+    '【NPC】送礼物提升好感（料理不能送礼）；好感分 陌生/熟识/友好/亲近/投缘/知己/至交 七档。',
+    '【委托】每位 NPC 都有随机委托（好感达标出现），接取后在 TA 的界面提交；委托完成后不再重复出现。',
+    '【商店】游村长扩建农田、木伯建筑升级、阿溪渔具商店、小信交易商店+邮件、许先生杂货商店、翠姐酒馆（料理）、玲婆婆草药变卖、知书图鉴委托、阿远物资交换。',
+    '【任务】找 NPC 接取任务，满足条件的任务可在 NPC 处提交领取奖励。',
+    '【存档】自动保存在本地浏览器(localStorage)。',
+    '【提示】所有界面均为 Canvas 绘制，弹窗内可用鼠标滚轮滚动。',
+  ];
+  for(const l of lines){ addText(p, l, 0, cw0, COL.text, 14); addGap(p,8); }
+  addGap(p,10); addDivider(p, cw0); addGap(p,6);
+  addText(p,'【存档迁移】可把当前存档导出为 JSON 文件，在电脑与手机之间迁移；也可导入他人存档。', 0, cw0, COL.sub, 13);
+  addGap(p,6);
+  addButton(p,'⬇ 导出存档 (JSON)', 0, cw0, 36, ()=>{ exportSave(); }, true, COL.accent);
+  addButton(p,'⬆ 导入存档 (JSON)', 0, cw0, 36, ()=>{ importSave(); }, true, COL.accent2);
+  addButton(p,'↩ 卡屏回退（回到小屋出生点）', 0, cw0, 36, ()=>{ fallbackToHome(); }, true, '#7FA0B0');
+  addGap(p,4);
+  finalizePopup(p);
+}
+function openMapPopup(){
+  const p=openBlankPopup('世界地图', {});
+  const pad=18, cw0=p.pw-pad*2;
+  const mw=cw0, mh=Math.min(420, mw*MAP_H/MAP_W);
+  p.items.push({type:'map', x:0, y:p._cy, w:mw, h:mh});
+  p._cy+=mh+10;
+  addText(p,'◆橙三角=你（实时）　●彩色点=NPC实时位置　△灰=未发现遗迹　★金=已发现遗迹', 0, cw0, COL.sub, 12);
+  addGap(p,4);
+  addText(p,'八大区域：石陶谷(西北)·匠作坪(北中)·木犀猎岭(东北)·闲居坊(中西)·望月中央广场(正中)·通衢市井(中东)·归耕农场(西南)·星湖湾(东南)', 0, cw0, COL.sub, 12);
+  finalizePopup(p);
+}
+function openTasks(){
+  const p=openBlankPopup('任务', {});
+  p.tabs=['进行中','已完成'];
+  p.activeTab=0;
+  p.onTab=(i)=>{ buildTasksContent(p); };
+  function buildTasksContent(pp){
+    pp.items=[]; pp._cy=0;
+    const pad=18, cw0=pp.pw-pad*2;
+    if(pp.activeTab===0){
+      // 进行中：已接取但未完成的链任务
+      let any=false;
+      for(const id of Object.keys(NPC_CHAINS)){
+        const ch=NPC_CHAINS[id];
+        const qs=state.quests[id];
+        if(!qs||!qs.chainDone) continue;
+        if(qs.accepted>=0 && qs.accepted<ch.length && !qs.chainDone[qs.accepted]){
+          const st=ch[qs.accepted]; const npc=map.npcs.find(n=>n.id===id);
+          any=true;
+          addText(pp,'【'+st.name+'】'+(npc?('（'+npc.name+'）'):''),0,cw0,COL.text,15);
+          addText(pp,st.desc,0,cw0,COL.sub,13);
+          if(st.scene==='deliver'){
+            const n=qs.deliver?Object.values(qs.deliver).filter(Boolean).length:0;
+            addText(pp,'进展：已递交 '+n+'/'+st.targets.length+'（与对应NPC交谈交付）',0,cw0,COL.sub,13);
+          } else if(st.scene==='interview'){
+            const n=qs.interview?Object.values(qs.interview).filter(Boolean).length:0;
+            addText(pp,'进展：已打听 '+n+'/'+st.targets.length+'（与对应NPC交谈）',0,cw0,COL.sub,13);
+          } else if(st.scene==='rain_night'){
+            addText(pp,'进展：雨天夜晚找阿溪即可完成',0,cw0,COL.sub,13);
+          } else if(st.scene==='edge'){
+            addText(pp,'进展：前往地图村外边缘即可完成',0,cw0,COL.sub,13);
+          } else {
+            let sat=true;
+            for(const k in st.req){ const have=state.inv[k]||0; const ok=have>=st.req[k]; if(!ok) sat=false;
+              addText(pp,(ok?'✓ ':'✗ ')+ITEMS[k].name+' '+have+'/'+st.req[k],0,cw0,ok?COL.accent2:COL.accent,13); }
+            addText(pp, sat?'可前往提交':'物品不足',0,cw0, sat?COL.accent2:COL.accent,13);
+          }
+          addGap(pp,10);
+        }
+      }
+      if(!any) addText(pp,'暂无可进行任务，提升好感后去找村民接取剧情任务吧',0,cw0,COL.sub,14);
+    } else {
+      // 已完成：所有 chainDone=true 的链任务
+      let any=false;
+      for(const id of Object.keys(NPC_CHAINS)){
+        const ch=NPC_CHAINS[id];
+        const qs=state.quests[id];
+        if(!qs||!qs.chainDone) continue;
+        const npc=map.npcs.find(n=>n.id===id);
+        for(let i=0;i<ch.length;i++){ if(qs.chainDone[i]){ any=true; addText(pp,'✓ '+ch[i].name+' — '+ch[i].desc+(npc?('（'+npc.name+'）'):''),0,cw0,COL.accent2,14); addGap(pp,8); } }
+      }
+      if(!any) addText(pp,'还没有已完成的剧情任务',0,cw0,COL.sub,14);
+    }
+  }
+  buildTasksContent(p);
+  finalizePopup(p);
+}
+function openRoster(){
+  const p=openBlankPopup('名册', {});
+  const pad=18, cw0=p.pw-pad*2;
+  map.npcs.forEach((npc, ni)=>{
+    const g=state.goodwill[npc.id]||0;
+    const fi=favorInfo(g);
+    // 名字+身份（单独一行）
+    addText(p, npc.name+'（'+npc.role+'）', 0, cw0, COL.text, 16);
+    addGap(p,2);
+    // 好感信息（单独一行）
+    addText(p, '好感：'+fi.tier+'  '+fi.value+'/'+fi.max, 0, cw0, COL.accent2, 13);
+    addGap(p,4);
+    // 简介：随总好感实时累计解锁的层级文本（自动换行）
+    const bio=NPC_BIO[npc.id];
+    if(bio){
+      for(let t=0; t<=fi.idx && t<bio.length; t++){
+        addText(p, (t>0?('〔'+FAVOR_TIERS[t]+'〕'):'')+bio[t], 0, cw0, (t===fi.idx?COL.text:COL.sub), 13);
+      }
+    }
+    // 往事秘辛板块：未达成条件显示灰色提示；达成后展示对应文本（分段解锁）
+    if(NPC_SECRET[npc.id]){
+      const su=storyUnlocked(npc.id);
+      if(su.shallow||su.mid||su.ultimate){
+        addGap(p,4);
+        addText(p,'【往事秘辛】', 0, cw0, COL.accent, 13);
+        if(su.shallow){ addText(p,'〔浅层往事〕'+NPC_SECRET[npc.id].shallow, 0, cw0, COL.sub, 13); }
+        if(su.mid){ addText(p,'〔中层过往〕'+NPC_SECRET[npc.id].mid, 0, cw0, COL.sub, 13); }
+        if(su.ultimate){ addText(p,'〔终极秘辛〕'+NPC_SECRET[npc.id].ultimate, 0, cw0, COL.sub, 13); }
+        addText(p,'〔名册〕'+NPC_SECRET[npc.id].roster, 0, cw0, COL.sub, 13);
+      } else {
+        addGap(p,4);
+        addText(p,'完成对应NPC任务 + 提升好感解锁往事秘辛', 0, cw0, COL.faint, 12);
+      }
+    } else if(npc.child){
+      // 孩童无往事秘辛：天真烟火气
+      addGap(p,4);
+      addText(p,'（孩童的天真里，藏着村子最寻常也最珍贵的烟火气。）', 0, cw0, COL.sub, 12);
+    }
+    // 分割线（浅棕色细线，最后一条不加）
+    if(ni < map.npcs.length-1) addDivider(p, cw0, '#D8C3A0');
+    else addGap(p, 10);
+  });
+  // 全局主线入口：集齐全部10位NPC至交+支线后，由玩家在此拼合“古农田遗迹”完整真相
+  if(state.mainStoryUnlocked || allSecretsComplete()){
+    addGap(p,6);
+    addText(p,'【主线 · 古农田遗迹】你已集齐十位村民各自交出的碎片，真相就在拼图之间。', 0, cw0, COL.accent, 13);
+    addGap(p,4);
+    addButton(p,'▶ 拼合千年古农田遗迹真相', 0, cw0, 36, ()=>{ openMainStory(); }, true, COL.accent);
+  }
+  finalizePopup(p);
+}
+
+/* ================= UI 按钮 ================= */
+let menuButtons=[], bottomButtons=[], invSlotsRender=[];
+function buildMenuButtons(){
+  menuButtons=[];
+  const labels=['地图','任务','图鉴','名册','帮助'];
+  const acts=[openMapPopup, openTasks, openCodex, openRoster, openHelp];
+  const bw=64, bh=34, gap=6;
+  const total=labels.length*(bw+gap)-gap;
+  let x=cw-total-14, y=52;   // 紧贴缩小后的顶部状态栏（h=36，底边44）+8px，靠右对齐；样式/文字/交互完全不变，仅改变绘制位置
+  for(let i=0;i<labels.length;i++){
+    menuButtons.push({x:x+i*(bw+gap), y, w:bw, h:bh, label:labels[i], action:acts[i]});
+  }
+}
+function buildBottomButtons(){
+  bottomButtons=[];
+  const labels=['种植','采集','钓鱼','畜牧','睡觉','凿石','伐木','背包'];
+  const acts=[doPlant,doCollect,doFish,doAnimal,doSleep,doMine,doChop,toggleInventory];
+  const n=labels.length;
+  const small = cw < 760;
+  if(!small){
+    // 桌面：底部单行居中（原有逻辑不变）
+    const bw=80, bh=46, gap=6;
+    const total=n*bw+(n-1)*gap;
+    let x=(cw-total)/2, y=ch-bh-12;
+    for(let i=0;i<n;i++){
+      bottomButtons.push({x:x+i*(bw+gap), y, w:bw, h:bh, label:labels[i], action:acts[i]});
+    }
+  } else {
+    // 小屏：动作栏换行置于右下区域，避开左下角虚拟 D-pad
+    const dpadW=144+24, bw=64, bh=42, gap=6;
+    const avail=Math.max(bw, cw-dpadW-12);
+    const perRow=Math.max(1, Math.floor((avail+gap)/(bw+gap)));
+    const rows=Math.ceil(n/perRow);
+    const blockH=rows*bh+(rows-1)*gap;
+    const rowW=Math.min(avail, perRow*(bw+gap)-gap);
+    const sx=cw-12-rowW, sy=ch-12-blockH;
+    for(let i=0;i<n;i++){
+      const r=Math.floor(i/perRow), c=i%perRow;
+      bottomButtons.push({x:sx+c*(bw+gap), y:sy+r*(bh+gap), w:bw, h:bh, label:labels[i], action:acts[i]});
+    }
+  }
+}
+function toggleInventory(){
+  state.invExpanded = !state.invExpanded;
+  toast(state.invExpanded ? '背包已展开' : '背包已收起');
+}
+
+/* ================= 渲染 ================= */
+function drawItemIcon(id, x, y, s){
+  const it=ITEMS[id]; if(!it) return;
+  ctx.save();
+  ctx.translate(x+s/2, y+s/2);
+  ctx.fillStyle=it.color;
+  const sh=it.shape;
+  if(sh==='seed'){ rr(ctx,-s*0.18,-s*0.28,s*0.36,s*0.56,4); ctx.fill(); }
+  else if(sh==='grain'){ for(let i=-1;i<=1;i++){ rr(ctx,i*s*0.16-s*0.06,-s*0.3,s*0.12,s*0.6,3); ctx.fill(); } }
+  else if(sh==='root'){ ctx.beginPath(); ctx.moveTo(0,s*0.3); ctx.quadraticCurveTo(s*0.28,0,0,-s*0.3); ctx.quadraticCurveTo(-s*0.28,0,0,s*0.3); ctx.fill(); }
+  else if(sh==='round'){ ctx.beginPath(); ctx.arc(0,0,s*0.28,0,6.28); ctx.fill(); ctx.fillStyle='#7fae4e'; ctx.beginPath(); ctx.moveTo(0,-s*0.28); ctx.lineTo(s*0.12,-s*0.4); ctx.lineTo(-s*0.05,-s*0.3); ctx.fill(); }
+  else if(sh==='log'){ rr(ctx,-s*0.3,-s*0.16,s*0.6,s*0.32,5); ctx.fill(); ctx.fillStyle='#c89a6a'; ctx.beginPath(); ctx.arc(-s*0.3,0,s*0.16,0,6.28); ctx.fill(); }
+  else if(sh==='rock'){ ctx.beginPath(); ctx.moveTo(-s*0.3,s*0.2); ctx.lineTo(-s*0.1,-s*0.25); ctx.lineTo(s*0.2,-s*0.28); ctx.lineTo(s*0.3,s*0.15); ctx.lineTo(0,s*0.28); ctx.closePath(); ctx.fill(); }
+  else if(sh==='leaf'){ ctx.beginPath(); ctx.ellipse(0,0,s*0.16,s*0.3,0.5,0,6.28); ctx.fill(); }
+  else if(sh==='berry'){ ctx.beginPath(); ctx.arc(-s*0.1,0,s*0.16,0,6.28); ctx.arc(s*0.12,0.05,s*0.14,0,6.28); ctx.arc(0,s*0.12,s*0.13,0,6.28); ctx.fill(); }
+  else if(sh==='mush'){ ctx.fillStyle='#F0E6D2'; rr(ctx,-s*0.08,-s*0.05,s*0.16,s*0.3,3); ctx.fill(); ctx.fillStyle=it.color; ctx.beginPath(); ctx.arc(0,-s*0.05,s*0.26,Math.PI,0); ctx.fill(); }
+  else if(sh==='flower'){ for(let a=0;a<6;a++){ ctx.beginPath(); ctx.arc(Math.cos(a)*s*0.18,Math.sin(a)*s*0.18,s*0.1,0,6.28); ctx.fill(); } ctx.fillStyle='#F2D24A'; ctx.beginPath(); ctx.arc(0,0,s*0.1,0,6.28); ctx.fill(); }
+  else if(sh==='fish'){ ctx.beginPath(); ctx.ellipse(-s*0.05,0,s*0.28,s*0.16,0,0,6.28); ctx.fill(); ctx.beginPath(); ctx.moveTo(s*0.2,0); ctx.lineTo(s*0.34,-s*0.14); ctx.lineTo(s*0.34,s*0.14); ctx.closePath(); ctx.fill(); }
+  else if(sh==='shrimp'){ ctx.beginPath(); ctx.arc(0,0,s*0.22,0,6.28); ctx.fill(); }
+  else if(sh==='bottle'){ rr(ctx,-s*0.14,-s*0.28,s*0.28,s*0.5,4); ctx.fill(); }
+  else if(sh==='egg'){ ctx.beginPath(); ctx.ellipse(0,0,s*0.18,s*0.24,0,0,6.28); ctx.fill(); }
+  else if(sh==='fluff'){ ctx.beginPath(); ctx.arc(-s*0.08,-s*0.05,s*0.18,0,6.28); ctx.arc(s*0.1,-s*0.05,s*0.16,0,6.28); ctx.arc(0,s*0.08,s*0.18,0,6.28); ctx.fill(); }
+  else if(sh==='coin'){ ctx.beginPath(); ctx.arc(0,0,s*0.26,0,6.28); ctx.fill(); ctx.fillStyle='#B8932E'; ctx.font='bold '+(s*0.3)+'px sans-serif'; ctx.textAlign='center'; ctx.fillText('¥',0,s*0.1); ctx.textAlign='left'; }
+  else if(sh==='bag'){ rr(ctx,-s*0.22,-s*0.1,s*0.44,s*0.36,5); ctx.fill(); ctx.fillStyle='#A8842F'; rr(ctx,-s*0.08,-s*0.22,s*0.16,s*0.14,3); ctx.fill(); }
+  else if(sh==='rod'){ ctx.strokeStyle=it.color; ctx.lineWidth=s*0.07; ctx.beginPath(); ctx.moveTo(-s*0.28,s*0.28); ctx.lineTo(s*0.28,-s*0.28); ctx.stroke(); }
+  else { rr(ctx,-s*0.25,-s*0.25,s*0.5,s*0.5,4); ctx.fill(); }
+  ctx.restore();
+}
+
+function drawWorld(){
+  // 地面
+  const x0=Math.floor(cam.x/TILE), y0=Math.floor(cam.y/TILE);
+  const x1=Math.ceil((cam.x+cw)/TILE), y1=Math.ceil((cam.y+ch)/TILE);
+  for(let tx=x0;tx<=x1;tx++){
+    for(let ty=y0;ty<=y1;ty++){
+      if(tx<0||ty<0||tx>=MAP_W||ty>=MAP_H) continue;
+      const sx=tx*TILE-cam.x, sy=ty*TILE-cam.y;
+      if(map.road.has(key(tx,ty))){
+        ctx.fillStyle=COL.road; ctx.fillRect(sx,sy,TILE,TILE);
+        ctx.strokeStyle=COL.roadLine; ctx.lineWidth=2;
+        ctx.beginPath(); ctx.moveTo(sx+TILE/2,sy+6); ctx.lineTo(sx+TILE/2,sy+TILE-6); ctx.stroke();
+      } else if(map.plaza.has(key(tx,ty))){
+        // 中央广场：瓷砖硬地（双色棋盘，瓦缝描边），覆盖默认草地
+        ctx.fillStyle=((tx+ty)&1)?COL.plaza:COL.plaza2; ctx.fillRect(sx,sy,TILE,TILE);
+        ctx.strokeStyle='rgba(150,128,92,0.45)'; ctx.lineWidth=1; ctx.strokeRect(sx+0.5,sy+0.5,TILE-1,TILE-1);
+      } else if(map.water.has(key(tx,ty))){
+        ctx.fillStyle=((tx+ty)&1)?COL.water:COL.water2; ctx.fillRect(sx,sy,TILE,TILE);
+      } else {
+        ctx.fillStyle=((tx+ty)&1)?COL.grassA:COL.grassB; ctx.fillRect(sx,sy,TILE,TILE);
+        // 围栏瓦片：草地上叠加深棕色 fence 短竖线
+        if(map.fence && map.fence.has(key(tx,ty))){
+          ctx.strokeStyle='#7A5236'; ctx.lineWidth=2;
+          ctx.beginPath(); ctx.moveTo(sx+TILE/2,sy+5); ctx.lineTo(sx+TILE/2,sy+TILE-5); ctx.stroke();
+          ctx.strokeStyle='rgba(122,82,54,0.5)'; ctx.lineWidth=1;
+          ctx.beginPath(); ctx.moveTo(sx+TILE/2-3,sy+TILE/2); ctx.lineTo(sx+TILE/2+3,sy+TILE/2); ctx.stroke();
+        }
+      }
+    }
+  }
+  // 农田（按 y 排序与角色/建筑一起深度绘制）
+  const drawables=[];
+  for(const p of map.plots){ drawables.push({y:(p.ty+0.5)*TILE, kind:'plot', o:p}); }
+  for(const b of map.buildings){ drawables.push({y:(b.ty+b.th)*TILE, kind:'building', o:b}); }
+  for(const t of map.trees){ drawables.push({y:(t.ty+1)*TILE, kind:'tree', o:t}); }
+  for(const r of map.rocks){ drawables.push({y:(r.ty+1)*TILE, kind:'rock', o:r}); }
+  for(const npc of map.npcs){ drawables.push({y:npc.y+8, kind:'npc', o:npc}); }
+  for(const a of map.animals){ drawables.push({y:(a.ty+1)*TILE, kind:'animal', o:a}); }
+  drawables.push({y:state.py+8, kind:'player', o:null});
+  drawables.sort((A,B)=>A.y-B.y);
+
+  for(const d of drawables){
+    if(d.kind==='plot') drawPlot(d.o);
+    else if(d.kind==='building') drawBuilding(d.o);
+    else if(d.kind==='tree') drawTree(d.o);
+    else if(d.kind==='rock') drawRock(d.o);
+    else if(d.kind==='npc'){ if(!npcHidden(d.o)) drawActor(d.o.x,d.o.y,d.o.color,d.o.id,'npc'); }
+    else if(d.kind==='animal') drawAnimal(d.o);
+    else if(d.kind==='player') drawActor(state.px,state.py,'#D86b5b','player',state.dir);
+  }
+  // 采集物（画在地面层上方，独立，不参与深度也可）
+  for(const r of map.resources){
+    const sx=(r.tx+0.5)*TILE-cam.x, sy=(r.ty+0.9)*TILE-cam.y;
+    drawResource(r, sx, sy);
+  }
+  // 睡觉 zzz
+  if(state.sleeping && nearPlayerHouse()){
+    const hx=5*TILE-cam.x, hy=44*TILE-cam.y;
+    drawZZZ(hx, hy);
+  }
+}
+
+function drawPlot(p){
+  const sx=p.tx*TILE-cam.x, sy=p.ty*TILE-cam.y;
+  if(p.stage==='wild'){
+    ctx.fillStyle='rgba(150,110,60,0.18)'; rr(ctx,sx+4,sy+4,TILE-8,TILE-8,6); ctx.fill();
+    ctx.strokeStyle='rgba(120,85,45,0.5)'; ctx.setLineDash([5,4]); ctx.lineWidth=2; rr(ctx,sx+4,sy+4,TILE-8,TILE-8,6); ctx.stroke(); ctx.setLineDash([]);
+    return;
+  }
+  // 土壤
+  ctx.fillStyle = p.watered? COL.plotTill2: COL.plotTill;
+  rr(ctx,sx+3,sy+3,TILE-6,TILE-6,6); ctx.fill();
+  ctx.strokeStyle='#6f4a26'; ctx.lineWidth=2; rr(ctx,sx+3,sy+3,TILE-6,TILE-6,6); ctx.stroke();
+  // 犁沟
+  ctx.strokeStyle='rgba(110,74,38,0.5)'; ctx.lineWidth=1.5;
+  for(let i=1;i<3;i++){ ctx.beginPath(); ctx.moveTo(sx+8,sy+3+i*13); ctx.lineTo(sx+TILE-8,sy+3+i*13); ctx.stroke(); }
+  const cx=sx+TILE/2, cy=sy+TILE/2;
+  if(p.stage==='seeded'){
+    ctx.fillStyle=COL.plotSeed; ctx.fillRect(cx-2,cy,4,10); ctx.beginPath(); ctx.ellipse(cx,cy-2,6,4,0,0,6.28); ctx.fill();
+  } else if(p.stage==='growing'){
+    ctx.fillStyle=COL.plotGrow;
+    ctx.beginPath(); ctx.ellipse(cx-5,cy-2,5,9,0,0,6.28); ctx.fill();
+    ctx.beginPath(); ctx.ellipse(cx+5,cy-2,5,9,0,0,6.28); ctx.fill();
+    ctx.fillRect(cx-2,cy+4,4,8);
+  } else if(p.stage==='mature'){
+    const c=ITEMS[p.crop]?ITEMS[p.crop].color:'#e7c24a';
+    ctx.fillStyle=c;
+    ctx.beginPath(); ctx.arc(cx,cy-4,11,0,6.28); ctx.fill();
+    ctx.fillStyle='#7fae4e'; ctx.fillRect(cx-2,cy+4,4,10);
+  }
+}
+function drawTree(t){
+  const sx=(t.tx+0.5)*TILE-cam.x, sy=(t.ty+1)*TILE-cam.y;
+  ctx.fillStyle=COL.shadow; ctx.beginPath(); ctx.ellipse(sx,sy-2,16,6,0,0,6.28); ctx.fill();
+  if(t.depleted){ ctx.fillStyle='#6b4a2a'; rr(ctx,sx-6,sy-10,12,10,3); ctx.fill(); return; }
+  ctx.fillStyle='#8a5a32'; rr(ctx,sx-5,sy-26,10,26,3); ctx.fill();
+  ctx.fillStyle='#7fae4e'; ctx.beginPath(); ctx.arc(sx,sy-34,20,0,6.28); ctx.fill();
+  ctx.fillStyle='#8fbf5a'; ctx.beginPath(); ctx.arc(sx-8,sy-40,12,0,6.28); ctx.fill();
+  ctx.beginPath(); ctx.arc(sx+9,sy-38,11,0,6.28); ctx.fill();
+}
+function drawRock(r){
+  const sx=(r.tx+0.5)*TILE-cam.x, sy=(r.ty+1)*TILE-cam.y;
+  ctx.fillStyle=COL.shadow; ctx.beginPath(); ctx.ellipse(sx,sy-2,16,6,0,0,6.28); ctx.fill();
+  if(r.depleted){ ctx.fillStyle='#7a8085'; ctx.beginPath(); ctx.arc(sx-3,sy-3,5,0,6.28); ctx.arc(sx+4,sy-4,4,0,6.28); ctx.arc(sx,sy-7,3,0,6.28); ctx.fill(); return; }
+  ctx.fillStyle='#9AA0A6'; ctx.beginPath(); ctx.moveTo(sx-16,sy-4); ctx.lineTo(sx-6,sy-22); ctx.lineTo(sx+10,sy-24); ctx.lineTo(sx+17,sy-6); ctx.lineTo(sx+2,sy+2); ctx.closePath(); ctx.fill();
+  ctx.fillStyle='#b7bcc1'; ctx.beginPath(); ctx.moveTo(sx-6,sy-22); ctx.lineTo(sx+10,sy-24); ctx.lineTo(sx+2,sy-10); ctx.closePath(); ctx.fill();
+}
+function drawBuilding(b){
+  const sx=b.tx*TILE-cam.x, sy=b.ty*TILE-cam.y;
+  const w=b.tw*TILE, h=b.th*TILE;
+  // 阴影
+  ctx.fillStyle=COL.shadow; ctx.fillRect(sx+6,sy+h-6,w-12,8);
+
+  if(b.id==='bbq'){
+    // 露营地：帐篷
+    ctx.fillStyle='#C9A06B'; ctx.beginPath(); ctx.moveTo(sx+6,sy+h-6); ctx.lineTo(sx+w/2,sy+14); ctx.lineTo(sx+w-6,sy+h-6); ctx.closePath(); ctx.fill();
+    ctx.fillStyle='#7a5230'; rr(ctx,sx+w/2-10,sy+h-30,20,24,3); ctx.fill();
+    ctx.fillStyle='#E0A45E'; ctx.beginPath(); ctx.arc(sx+w/2,sy+14,5,0,6.28); ctx.fill();
+    drawTag(sx+w/2, sy-6, b.label); return;
+  }
+  if(b.id==='tao'){
+    // 陶叔陶坊：窑炉造型，烟囱，陶罐装饰
+    ctx.fillStyle='#E8C8A0'; rr(ctx,sx+4,sy+h*0.35,w-8,h*0.65-4,4); ctx.fill();
+    ctx.fillStyle='#B5703C'; ctx.beginPath(); ctx.moveTo(sx-2,sy+h*0.38); ctx.lineTo(sx+w/2,sy+8); ctx.lineTo(sx+w+2,sy+h*0.38); ctx.closePath(); ctx.fill();
+    // 烟囱
+    ctx.fillStyle='#8B6B4A'; rr(ctx,sx+w*0.7,sy+2,14,h*0.3,2); ctx.fill();
+    ctx.fillStyle='rgba(180,180,180,0.5)'; ctx.beginPath(); ctx.arc(sx+w*0.7+7,sy-2,6,0,6.28); ctx.fill();
+    // 陶罐装饰
+    ctx.fillStyle='#C98B5A'; ctx.beginPath(); ctx.ellipse(sx+18,sy+h-18,8,10,0,0,6.28); ctx.fill();
+    ctx.fillStyle='#D9A06B'; ctx.beginPath(); ctx.ellipse(sx+w-18,sy+h-20,6,8,0,0,6.28); ctx.fill();
+    // 门
+    ctx.fillStyle='#7a5230'; rr(ctx,sx+w/2-12,sy+h-34,24,30,4); ctx.fill();
+    drawTag(sx+w/2, sy-6, b.label); return;
+  }
+  if(b.id==='carpenter'){
+    // 木伯工坊：木屋风格，可见木梁，锯木架
+    ctx.fillStyle='#C8A878'; rr(ctx,sx+4,sy+h*0.4,w-8,h*0.6-4,4); ctx.fill();
+    ctx.fillStyle='#9FA86B'; ctx.beginPath(); ctx.moveTo(sx-4,sy+h*0.42); ctx.lineTo(sx+w/2,sy+6); ctx.lineTo(sx+w+4,sy+h*0.42); ctx.closePath(); ctx.fill();
+    // 木梁装饰
+    ctx.strokeStyle='#8B6B3A'; ctx.lineWidth=3;
+    ctx.beginPath(); ctx.moveTo(sx+10,sy+h*0.42); ctx.lineTo(sx+10,sy+h-6); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(sx+w-10,sy+h*0.42); ctx.lineTo(sx+w-10,sy+h-6); ctx.stroke();
+    // 锯木架
+    ctx.strokeStyle='#7a5230'; ctx.lineWidth=2;
+    ctx.beginPath(); ctx.moveTo(sx+w+4,sy+h-20); ctx.lineTo(sx+w+14,sy+h-10); ctx.lineTo(sx+w+4,sy+h-6); ctx.stroke();
+    // 门
+    ctx.fillStyle='#6a4220'; rr(ctx,sx+w/2-12,sy+h-34,24,30,4); ctx.fill();
+    // 窗（木框）
+    ctx.fillStyle='#cfe0e8'; rr(ctx,sx+16,sy+h*0.52,14,14,2); ctx.fill();
+    ctx.strokeStyle='#8B6B3A'; ctx.lineWidth=2; rr(ctx,sx+16,sy+h*0.52,14,14,2); ctx.stroke();
+    drawTag(sx+w/2, sy-6, b.label); return;
+  }
+  if(b.id==='yuan'){
+    // 阿远猎屋：猎人小屋，斜屋顶，鹿角装饰
+    ctx.fillStyle='#A8B890'; rr(ctx,sx+4,sy+h*0.42,w-8,h*0.58-4,4); ctx.fill();
+    ctx.fillStyle='#6B8A5B'; ctx.beginPath(); ctx.moveTo(sx-6,sy+h*0.44); ctx.lineTo(sx+w/2,sy+4); ctx.lineTo(sx+w+6,sy+h*0.44); ctx.closePath(); ctx.fill();
+    // 鹿角装饰
+    ctx.strokeStyle='#8B6B3A'; ctx.lineWidth=2;
+    ctx.beginPath(); ctx.moveTo(sx+w/2-8,sy+10); ctx.lineTo(sx+w/2-14,sy-2); ctx.lineTo(sx+w/2-10,sy-8); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(sx+w/2-14,sy-2); ctx.lineTo(sx+w/2-18,sy-6); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(sx+w/2+8,sy+10); ctx.lineTo(sx+w/2+14,sy-2); ctx.lineTo(sx+w/2+10,sy-8); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(sx+w/2+14,sy-2); ctx.lineTo(sx+w/2+18,sy-6); ctx.stroke();
+    // 门（兽皮帘）
+    ctx.fillStyle='#8B6B3A'; rr(ctx,sx+w/2-12,sy+h-34,24,30,4); ctx.fill();
+    ctx.fillStyle='#A0805A'; rr(ctx,sx+w/2-8,sy+h-30,16,22,2); ctx.fill();
+    drawTag(sx+w/2, sy-6, b.label); return;
+  }
+  if(b.id==='cui'){
+    // 翠姐酒馆：温暖红棕，灯笼，酒桶
+    ctx.fillStyle='#F3E8CC'; rr(ctx,sx+4,sy+h*0.4,w-8,h*0.6-4,4); ctx.fill();
+    ctx.fillStyle='#C96B8A'; ctx.beginPath(); ctx.moveTo(sx-4,sy+h*0.42); ctx.lineTo(sx+w/2,sy+6); ctx.lineTo(sx+w+4,sy+h*0.42); ctx.closePath(); ctx.fill();
+    // 灯笼
+    ctx.fillStyle='#E8A040'; ctx.beginPath(); ctx.arc(sx+w/2,sy+h*0.42+8,6,0,6.28); ctx.fill();
+    ctx.fillStyle='#FFD060'; ctx.beginPath(); ctx.arc(sx+w/2,sy+h*0.42+8,4,0,6.28); ctx.fill();
+    // 酒桶
+    ctx.fillStyle='#8B6B3A'; ctx.beginPath(); ctx.ellipse(sx+14,sy+h-16,8,10,0,0,6.28); ctx.fill();
+    ctx.strokeStyle='#6a4a2a'; ctx.lineWidth=1.5; ctx.beginPath(); ctx.ellipse(sx+14,sy+h-16,8,10,0,0,6.28); ctx.stroke();
+    // 大门
+    ctx.fillStyle='#7a5230'; rr(ctx,sx+w/2-16,sy+h-38,32,34,4); ctx.fill();
+    ctx.fillStyle='#E8A040'; ctx.beginPath(); ctx.arc(sx+w/2+10,sy+h-22,3,0,6.28); ctx.fill();
+    drawTag(sx+w/2, sy-6, b.label); return;
+  }
+  if(b.id==='granny'){
+    // 游村长家：庄重典雅，石基，双窗，门牌
+    ctx.fillStyle='#EFE2C4'; rr(ctx,sx+4,sy+h*0.38,w-8,h*0.62-4,4); ctx.fill();
+    // 石基
+    ctx.fillStyle='#B0A08A'; rr(ctx,sx+4,sy+h-16,w-8,12,2); ctx.fill();
+    ctx.fillStyle='#C98B6B'; ctx.beginPath(); ctx.moveTo(sx-4,sy+h*0.4); ctx.lineTo(sx+w/2,sy+4); ctx.lineTo(sx+w+4,sy+h*0.4); ctx.closePath(); ctx.fill();
+    // 门牌
+    ctx.fillStyle='#8B6B3A'; rr(ctx,sx+w/2-10,sy+h*0.4+2,20,12,2); ctx.fill();
+    ctx.fillStyle='#E8C080'; setFont(8,true); ctx.textAlign='center'; ctx.fillText('村长',sx+w/2,sy+h*0.4+12); ctx.textAlign='left';
+    // 双窗
+    ctx.fillStyle='#cfe0e8'; rr(ctx,sx+12,sy+h*0.52,16,16,3); ctx.fill(); rr(ctx,sx+w-28,sy+h*0.52,16,16,3); ctx.fill();
+    // 门
+    ctx.fillStyle='#7a5230'; rr(ctx,sx+w/2-14,sy+h-38,28,34,4); ctx.fill();
+    drawTag(sx+w/2, sy-6, b.label); return;
+  }
+  if(b.id==='player'){
+    // 玩家小屋：随等级变化
+    const lv=state.houseLevel;
+    const wallC=['#F1E6C8','#E8D8B0','#D8C8A0','#C8B890'][Math.min(lv-1,3)];
+    const roofC=['#C98B6B','#B57A5A','#A06A4A','#8B5A3A'][Math.min(lv-1,3)];
+    ctx.fillStyle=wallC; rr(ctx,sx+4,sy+h*0.4,w-8,h*0.6-4,4); ctx.fill();
+    ctx.fillStyle=roofC; ctx.beginPath(); ctx.moveTo(sx-4,sy+h*0.42); ctx.lineTo(sx+w/2,sy+6); ctx.lineTo(sx+w+4,sy+h*0.42); ctx.closePath(); ctx.fill();
+    // 门
+    ctx.fillStyle='#7a5230'; rr(ctx,sx+w/2-12,sy+h-34,24,30,4); ctx.fill();
+    // 窗
+    ctx.fillStyle='#cfe0e8'; rr(ctx,sx+12,sy+h*0.55,16,16,3); ctx.fill(); rr(ctx,sx+w-28,sy+h*0.55,16,16,3); ctx.fill();
+    // 等级星标
+    if(lv>=2){ ctx.fillStyle='#E8C24A'; for(let i=0;i<lv-1;i++){ ctx.beginPath(); ctx.arc(sx+w/2-8+i*10,sy+18,3,0,6.28); ctx.fill(); } }
+    drawTag(sx+w/2, sy-6, '我的家 lvl:'+lv); return;
+  }
+  if(b.id==='you'){
+    // 许先生杂货铺：商铺风格，招牌，货架
+    ctx.fillStyle='#F3E8CC'; rr(ctx,sx+4,sy+h*0.4,w-8,h*0.6-4,4); ctx.fill();
+    ctx.fillStyle='#D8A24B'; ctx.beginPath(); ctx.moveTo(sx-2,sy+h*0.42); ctx.lineTo(sx+w/2,sy+8); ctx.lineTo(sx+w+2,sy+h*0.42); ctx.closePath(); ctx.fill();
+    // 招牌
+    ctx.fillStyle='#8B6B3A'; rr(ctx,sx+w/2-20,sy+h*0.42-4,40,14,3); ctx.fill();
+    ctx.fillStyle='#E8C080'; setFont(9,true); ctx.textAlign='center'; ctx.fillText('杂货',sx+w/2,sy+h*0.42+7); ctx.textAlign='left';
+    // 货架展示
+    ctx.fillStyle='#C9A06B'; rr(ctx,sx+8,sy+h*0.55,10,10,2); ctx.fill(); rr(ctx,sx+22,sy+h*0.55,10,10,2); ctx.fill();
+    // 门
+    ctx.fillStyle='#7a5230'; rr(ctx,sx+w/2-12,sy+h-34,24,30,4); ctx.fill();
+    drawTag(sx+w/2, sy-6, b.label); return;
+  }
+  if(b.id==='xinxin'){
+    // 小信邮局：邮筒，信件装饰
+    ctx.fillStyle='#EFE2C4'; rr(ctx,sx+4,sy+h*0.4,w-8,h*0.6-4,4); ctx.fill();
+    ctx.fillStyle='#C96B9A'; ctx.beginPath(); ctx.moveTo(sx-2,sy+h*0.42); ctx.lineTo(sx+w/2,sy+8); ctx.lineTo(sx+w+2,sy+h*0.42); ctx.closePath(); ctx.fill();
+    // 邮筒
+    ctx.fillStyle='#C94040'; rr(ctx,sx+w-20,sy+h-36,12,24,4); ctx.fill();
+    ctx.fillStyle='#A03030'; rr(ctx,sx+w-20,sy+h-36,12,6,3); ctx.fill();
+    // 信件装饰
+    ctx.fillStyle='#F0E0C0'; ctx.save(); ctx.translate(sx+16,sy+h*0.55); ctx.rotate(0.2); rr(ctx,-8,-5,16,10,2); ctx.fill(); ctx.restore();
+    // 门
+    ctx.fillStyle='#7a5230'; rr(ctx,sx+w/2-12,sy+h-34,24,30,4); ctx.fill();
+    drawTag(sx+w/2, sy-6, b.label); return;
+  }
+  if(b.id==='zhishu'){
+    // 书塾：学堂风格，书卷装饰，匾额
+    ctx.fillStyle='#E8E0D0'; rr(ctx,sx+4,sy+h*0.38,w-8,h*0.62-4,4); ctx.fill();
+    ctx.fillStyle='#6B8FC9'; ctx.beginPath(); ctx.moveTo(sx-4,sy+h*0.4); ctx.lineTo(sx+w/2,sy+4); ctx.lineTo(sx+w+4,sy+h*0.4); ctx.closePath(); ctx.fill();
+    // 匾额
+    ctx.fillStyle='#5A3A1A'; rr(ctx,sx+w/2-18,sy+h*0.4-2,36,14,3); ctx.fill();
+    ctx.fillStyle='#E8D090'; setFont(10,true); ctx.textAlign='center'; ctx.fillText('书塾',sx+w/2,sy+h*0.4+9); ctx.textAlign='left';
+    // 窗（书卷形）
+    ctx.fillStyle='#cfe0e8'; rr(ctx,sx+12,sy+h*0.52,14,18,4); ctx.fill(); rr(ctx,sx+w-26,sy+h*0.52,14,18,4); ctx.fill();
+    // 门
+    ctx.fillStyle='#5A3A1A'; rr(ctx,sx+w/2-14,sy+h-38,28,34,4); ctx.fill();
+    drawTag(sx+w/2, sy-6, b.label); return;
+  }
+  if(b.id==='zhishuHouse'){
+    // 知书居所：文雅小屋，盆栽，窗纱
+    ctx.fillStyle='#E8E0D0'; rr(ctx,sx+4,sy+h*0.4,w-8,h*0.6-4,4); ctx.fill();
+    ctx.fillStyle='#6B8FC9'; ctx.beginPath(); ctx.moveTo(sx-4,sy+h*0.42); ctx.lineTo(sx+w/2,sy+6); ctx.lineTo(sx+w+4,sy+h*0.42); ctx.closePath(); ctx.fill();
+    // 盆栽
+    ctx.fillStyle='#8B6B3A'; rr(ctx,sx+10,sy+h-24,10,12,3); ctx.fill();
+    ctx.fillStyle='#5A8A3A'; ctx.beginPath(); ctx.arc(sx+15,sy+h-28,8,0,6.28); ctx.fill();
+    // 窗纱
+    ctx.fillStyle='#E8D8F0'; rr(ctx,sx+12,sy+h*0.52,16,16,3); ctx.fill(); rr(ctx,sx+w-28,sy+h*0.52,16,16,3); ctx.fill();
+    // 门
+    ctx.fillStyle='#5A3A1A'; rr(ctx,sx+w/2-12,sy+h-34,24,30,4); ctx.fill();
+    drawTag(sx+w/2, sy-6, b.label); return;
+  }
+  if(b.id==='axi'){
+    // 阿溪渔屋：渔家风格，渔网，鱼干
+    ctx.fillStyle='#E0D8C8'; rr(ctx,sx+4,sy+h*0.4,w-8,h*0.6-4,4); ctx.fill();
+    ctx.fillStyle='#6BA0C9'; ctx.beginPath(); ctx.moveTo(sx-4,sy+h*0.42); ctx.lineTo(sx+w/2,sy+6); ctx.lineTo(sx+w+4,sy+h*0.42); ctx.closePath(); ctx.fill();
+    // 渔网
+    ctx.strokeStyle='#A0907A'; ctx.lineWidth=1;
+    for(let i=0;i<4;i++){ ctx.beginPath(); ctx.moveTo(sx+w-6,sy+h*0.45+i*10); ctx.lineTo(sx+w+8,sy+h*0.5+i*10); ctx.stroke(); }
+    for(let i=0;i<3;i++){ ctx.beginPath(); ctx.moveTo(sx+w-2+i*5,sy+h*0.42); ctx.lineTo(sx+w-2+i*5,sy+h*0.75); ctx.stroke(); }
+    // 鱼干
+    ctx.fillStyle='#C9A06B'; ctx.beginPath(); ctx.ellipse(sx+16,sy+h-16,10,5,0.3,0,6.28); ctx.fill();
+    ctx.fillStyle='#8B7050'; ctx.beginPath(); ctx.moveTo(sx+26,sy+h-16); ctx.lineTo(sx+30,sy+h-18); ctx.lineTo(sx+30,sy+h-14); ctx.closePath(); ctx.fill();
+    // 门
+    ctx.fillStyle='#5A4A3A'; rr(ctx,sx+w/2-12,sy+h-34,24,30,4); ctx.fill();
+    drawTag(sx+w/2, sy-6, b.label); return;
+  }
+
+  // 默认房屋（备用）
+  ctx.fillStyle=b.wall||'#EFE2C4'; rr(ctx,sx+4,sy+h*0.42,w-8,h*0.58-4,4); ctx.fill();
+  ctx.fillStyle=b.roof||'#C98B6B'; ctx.beginPath(); ctx.moveTo(sx-4,sy+h*0.45); ctx.lineTo(sx+w/2,sy+6); ctx.lineTo(sx+w+4,sy+h*0.45); ctx.closePath(); ctx.fill();
+  ctx.fillStyle='#7a5230'; rr(ctx,sx+w/2-12,sy+h-34,24,30,4); ctx.fill();
+  ctx.fillStyle='#cfe0e8'; rr(ctx,sx+12,sy+h*0.55,16,16,3); ctx.fill(); rr(ctx,sx+w-28,sy+h*0.55,16,16,3); ctx.fill();
+  drawTag(sx+w/2, sy-6, b.label);
+}
+function drawTag(cx, ty, text){
+  setFont(13,true);
+  const w=ctx.measureText(text).width+16;
+  const x=cx-w/2, y=ty-18;
+  rr(ctx,x,y,w,22,8); ctx.fillStyle='rgba(255,250,238,0.85)'; ctx.fill();
+  ctx.lineWidth=1.5; ctx.strokeStyle=COL.border; ctx.stroke();
+  ctx.fillStyle=COL.text; ctx.textAlign='center'; ctx.fillText(text,cx,y+15); ctx.textAlign='left';
+}
+function drawResource(r, sx, sy){
+  ctx.fillStyle=COL.shadow; ctx.beginPath(); ctx.ellipse(sx,sy+2,12,4,0,0,6.28); ctx.fill();
+  if(r.depleted){ ctx.fillStyle='#9a9a7a'; ctx.beginPath(); ctx.arc(sx,sy-4,6,0,6.28); ctx.fill(); return; }
+  if(r.type==='berry'){ ctx.fillStyle='#5a8a3c'; ctx.beginPath(); ctx.arc(sx,sy-6,12,0,6.28); ctx.fill();
+    ctx.fillStyle='#C0407A'; for(let i=0;i<4;i++){ ctx.beginPath(); ctx.arc(sx-6+i*4,sy-8+(i%2)*4,3,0,6.28); ctx.fill(); } }
+  else if(r.type==='fiber'){ ctx.strokeStyle='#7fae4e'; ctx.lineWidth=3; for(let i=-2;i<=2;i++){ ctx.beginPath(); ctx.moveTo(sx+i*3,sy+4); ctx.lineTo(sx+i*4,sy-14); ctx.stroke(); } }
+  else if(r.type==='mushroom'){ ctx.fillStyle='#F0E6D2'; rr(ctx,sx-3,sy-8,6,12,3); ctx.fill(); ctx.fillStyle='#D96B5B'; ctx.beginPath(); ctx.arc(sx,sy-8,8,Math.PI,0); ctx.fill(); }
+  else { ctx.fillStyle='#6fae4e'; ctx.beginPath(); ctx.arc(sx,sy-6,9,0,6.28); ctx.fill(); ctx.fillStyle='#E58FB0'; ctx.beginPath(); ctx.arc(sx,sy-12,5,0,6.28); ctx.fill(); }
+}
+function drawAnimal(a){
+  const sx=(a.tx+0.5)*TILE-cam.x, sy=(a.ty+1)*TILE-cam.y;
+  ctx.fillStyle=COL.shadow; ctx.beginPath(); ctx.ellipse(sx,sy-2,16,5,0,0,6.28); ctx.fill();
+  if(a.kind==='chicken'||a.kind==='duck'){
+    ctx.fillStyle=a.color; ctx.beginPath(); ctx.ellipse(sx,sy-12,14,11,0,0,6.28); ctx.fill();
+    ctx.beginPath(); ctx.arc(sx+10,sy-18,7,0,6.28); ctx.fill();
+    ctx.fillStyle='#E0893C'; ctx.beginPath(); ctx.moveTo(sx+16,sy-18); ctx.lineTo(sx+22,sy-16); ctx.lineTo(sx+16,sy-14); ctx.fill();
+  } else {
+    ctx.fillStyle=a.color; rr(ctx,sx-16,sy-22,32,22,10); ctx.fill();
+    ctx.beginPath(); ctx.arc(sx-14,sy-24,9,0,6.28); ctx.fill();
+    ctx.fillStyle='#3a2a1a'; ctx.beginPath(); ctx.arc(sx-18,sy-26,2,0,6.28); ctx.fill();
+  }
+}
+function drawActor(x,y,color,id,dir){
+  const sx=x-cam.x, sy=y-cam.y;
+  const npc = id==='player'? null : map.npcs.find(n=>n.id===id);
+  const isChild = npc && npc.child;
+  const sc = isChild ? 0.7 : 1;  // 孩童缩放
+
+  ctx.fillStyle=COL.shadow; ctx.beginPath(); ctx.ellipse(sx,sy-2,15*sc,5*sc,0,0,6.28); ctx.fill();
+
+  // 腿（左右分别绘制）
+  ctx.fillStyle='#5a4632';
+  rr(ctx,sx-8*sc,sy-14*sc,7*sc,14*sc,3); ctx.fill();
+  rr(ctx,sx+1*sc,sy-14*sc,7*sc,14*sc,3); ctx.fill();
+  // 身体
+  ctx.fillStyle=color; rr(ctx,sx-11*sc,sy-32*sc,22*sc,20*sc,8*sc); ctx.fill();
+  // 头
+  ctx.fillStyle='#F3D2A6'; ctx.beginPath(); ctx.arc(sx,sy-40*sc,11*sc,0,6.28); ctx.fill();
+
+  // === 各NPC独特装饰 ===
+  if(id==='player'){
+    // 玩家：红帽子
+    ctx.fillStyle='#D86b5b'; ctx.beginPath(); ctx.arc(sx,sy-46*sc,12*sc,Math.PI,0); ctx.fill(); ctx.fillRect(sx-12*sc,sy-46*sc,24*sc,4*sc);
+  } else if(id==='tao'){
+    // 陶叔：棕色围裙，头上毛巾
+    ctx.fillStyle='#C98B5A'; rr(ctx,sx-10*sc,sy-28*sc,20*sc,12*sc,4*sc); ctx.fill(); // 围裙
+    ctx.fillStyle='#E8D8C0'; rr(ctx,sx-10*sc,sy-50*sc,20*sc,4*sc,2*sc); ctx.fill(); // 毛巾
+  } else if(id==='carpenter'){
+    // 木伯：工作围裙，木屑
+    ctx.fillStyle='#8B6B3A'; rr(ctx,sx-10*sc,sy-30*sc,20*sc,14*sc,4*sc); ctx.fill(); // 围裙
+    ctx.fillStyle='#A08050'; ctx.beginPath(); ctx.arc(sx-8*sc,sy-46*sc,3*sc,0,6.28); ctx.fill(); // 木屑
+  } else if(id==='yuan'){
+    // 阿远：绿色兜帽
+    ctx.fillStyle='#5A7A4A'; ctx.beginPath(); ctx.arc(sx,sy-42*sc,13*sc,Math.PI,0); ctx.fill();
+    ctx.fillStyle='#5A7A4A'; rr(ctx,sx-13*sc,sy-42*sc,26*sc,6*sc,2*sc); ctx.fill();
+  } else if(id==='cui'){
+    // 翠姐：红棕围裙，发髻
+    ctx.fillStyle='#C96B8A'; rr(ctx,sx-10*sc,sy-28*sc,20*sc,12*sc,4*sc); ctx.fill();
+    ctx.fillStyle='#5a3a2a'; ctx.beginPath(); ctx.arc(sx,sy-52*sc,5*sc,0,6.28); ctx.fill(); // 发髻
+  } else if(id==='granny'){
+    // 游村长：典雅头巾
+    ctx.fillStyle='#C9A080'; ctx.beginPath(); ctx.arc(sx,sy-44*sc,13*sc,Math.PI*0.8,Math.PI*0.2); ctx.fill();
+    ctx.fillStyle='#C9A080'; rr(ctx,sx-12*sc,sy-46*sc,24*sc,5*sc,2*sc); ctx.fill();
+  } else if(id==='you'){
+    // 许先生：文人帽
+    ctx.fillStyle='#8B7B5A'; ctx.beginPath(); ctx.arc(sx,sy-46*sc,10*sc,Math.PI,0); ctx.fill();
+    ctx.fillStyle='#8B7B5A'; rr(ctx,sx-14*sc,sy-47*sc,28*sc,3*sc,2*sc); ctx.fill(); // 帽檐
+  } else if(id==='xinxin'){
+    // 小信：邮差帽，邮包
+    ctx.fillStyle='#4A6A8A'; rr(ctx,sx-12*sc,sy-50*sc,24*sc,6*sc,3*sc); ctx.fill(); // 帽子
+    ctx.fillStyle='#6A5A4A'; rr(ctx,sx+8*sc,sy-28*sc,10*sc,14*sc,3*sc); ctx.fill(); // 邮包
+  } else if(id==='ling'){
+    // 玲婆婆：紫色头巾
+    ctx.fillStyle='#8A5A8A'; ctx.beginPath(); ctx.arc(sx,sy-44*sc,13*sc,Math.PI*0.8,Math.PI*0.2); ctx.fill();
+    ctx.fillStyle='#8A5A8A'; rr(ctx,sx-12*sc,sy-46*sc,24*sc,5*sc,2*sc); ctx.fill();
+  } else if(id==='zhishu'){
+    // 知书：儒生帽，书卷
+    ctx.fillStyle='#5A6A8A'; ctx.beginPath(); ctx.arc(sx,sy-46*sc,9*sc,Math.PI,0); ctx.fill();
+    ctx.fillStyle='#5A6A8A'; rr(ctx,sx-4*sc,sy-54*sc,8*sc,10*sc,2*sc); ctx.fill(); // 帽顶
+    ctx.fillStyle='#E8D8B0'; rr(ctx,sx-14*sc,sy-26*sc,8*sc,10*sc,2*sc); ctx.fill(); // 书卷
+  } else if(id==='axi'){
+    // 阿溪：渔夫帽，鱼篓
+    ctx.fillStyle='#6A8A6A'; rr(ctx,sx-14*sc,sy-50*sc,28*sc,5*sc,3*sc); ctx.fill(); // 帽檐
+    ctx.fillStyle='#6A8A6A'; ctx.beginPath(); ctx.arc(sx,sy-48*sc,8*sc,Math.PI,0); ctx.fill();
+    ctx.fillStyle='#8A7A5A'; rr(ctx,sx+8*sc,sy-26*sc,9*sc,12*sc,3*sc); ctx.fill(); // 鱼篓
+  } else if(id==='ale'){
+    // 阿乐：小黄帽
+    ctx.fillStyle='#E0A85B'; ctx.beginPath(); ctx.arc(sx,sy-44*sc,8*sc,Math.PI,0); ctx.fill();
+    ctx.fillStyle='#E0A85B'; rr(ctx,sx-10*sc,sy-45*sc,20*sc,3*sc,2*sc); ctx.fill();
+  } else if(id==='wan'){
+    // 小晚：粉色蝴蝶结
+    ctx.fillStyle='#D080A0'; ctx.beginPath(); ctx.arc(sx-6*sc,sy-50*sc,4*sc,0,6.28); ctx.fill();
+    ctx.fillStyle='#D080A0'; ctx.beginPath(); ctx.arc(sx+6*sc,sy-50*sc,4*sc,0,6.28); ctx.fill();
+    ctx.fillStyle='#D080A0'; ctx.beginPath(); ctx.arc(sx,sy-48*sc,3*sc,0,6.28); ctx.fill();
+  } else {
+    // 默认：深棕色头发
+    ctx.fillStyle='#5a4632'; ctx.beginPath(); ctx.arc(sx,sy-46*sc,11*sc,Math.PI,0); ctx.fill();
+  }
+
+  // 眼睛
+  ctx.fillStyle='#3a2a1a'; ctx.beginPath(); ctx.arc(sx-4*sc,sy-40*sc,1.6*sc,0,6.28); ctx.arc(sx+4*sc,sy-40*sc,1.6*sc,0,6.28); ctx.fill();
+
+  if(id!=='player'){ drawTag(sx, sy-56*sc, map.npcs.find(n=>n.id===id).name); }
+}
+function drawZZZ(hx,hy){
+  const sx=hx-cam.x, sy=hy-cam.y;
+  setFont(18,true); ctx.fillStyle='#fff';
+  ctx.fillText('Z',sx-18,sy-50); ctx.fillText('z',sx-6,sy-62); ctx.fillText('z',sx+4,sy-72);
+}
+
+/* ---------------- 顶部状态栏 ---------------- */
+function drawTopBar(){
+  const h=36;
+  rr(ctx,8,8,cw-16,h,10); ctx.fillStyle='rgba(255,250,238,0.9)'; ctx.fill();
+  ctx.lineWidth=2; ctx.strokeStyle=COL.border; ctx.stroke();
+  const season=SEASONS[Math.floor((state.day-1)/SEASON_DAYS)%4];
+  const dayOf=((state.day-1)%SEASON_DAYS)+1;
+  const hh=Math.floor(state.time), mm=Math.floor((state.time-hh)*60);
+  const timeStr=String(hh).padStart(2,'0')+':'+String(mm).padStart(2,'0');
+  const fest = (state.day%7===0)?' · 集市日':'';
+  const fc = (state.weatherDays>1)? state.weather : state.pendingWeather;
+  // 单行水平流（h=36 紧凑版）：体力[bar]100/100 ｜ 季节 第N天【星期x】 ｜ 时间 hh:mm ｜ 天气 X(·集市日) ｜ 【次日天气预报】X
+  const y=30;
+  let x=20;
+  setFont(13,true); ctx.fillStyle=COL.text; ctx.textAlign='left';
+  // 体力
+  ctx.fillText('体力', x, y);
+  const bw=92, bx=x+36, by=y-12, bh=12;
+  rr(ctx,bx,by,bw,bh,6); ctx.fillStyle=COL.barBg; ctx.fill();
+  const ratio=state.stamina/state.maxStamina;
+  rr(ctx,bx,by,bw*ratio,bh,6); ctx.fillStyle= ratio<0.3? '#E07B5B': COL.accent2; ctx.fill();
+  ctx.lineWidth=1.5; ctx.strokeStyle=COL.border; rr(ctx,bx,by,bw,bh,6); ctx.stroke();
+  setFont(10,false); ctx.fillText(Math.floor(state.stamina)+'/'+state.maxStamina, bx+bw/2-16, y);
+  x = bx + bw + 18;
+  // 季节 天数 星期
+  const s1=season+'季 第'+dayOf+'天 【'+weekdayName()+'】';
+  ctx.fillText(s1, x, y); x += ctx.measureText(s1).width + 18;
+  // 时间
+  const s2='时间 '+timeStr;
+  ctx.fillText(s2, x, y); x += ctx.measureText(s2).width + 18;
+  // 天气 + 节庆
+  const wLabel='天气 '+state.weather;
+  ctx.fillText(wLabel, x, y); x += ctx.measureText(wLabel).width + 10;
+  if(fest){ ctx.fillText(fest, x, y); x += ctx.measureText(fest).width + 10; }
+  // 次日天气预报
+  ctx.fillStyle=COL.sub; ctx.fillText('【次日天气预报】'+fc, x, y);
+}
+function weatherNote(){
+  const w=state.weather;
+  if(w==='雷阵雨') return '雷阵雨：全田自动浇水，注意作物';
+  if(w==='台风') return '台风：NPC居家，注意安全';
+  if(w==='大雪') return '大雪：作物易枯死，体力消耗大增';
+  if(w==='小雪') return '小雪：冬日专属采集物，玲婆婆居家';
+  if(w==='大雨'||w==='小雨') return '雨天：适合作物生长';
+  if(w==='霜冻') return '霜冻：天气寒冷';
+  return '今日天气晴朗宜人';
+}
+
+/* ---------------- 底部操作栏 ---------------- */
+function drawBottomBar(){
+  for(const b of bottomButtons){
+    const hover=mouseX>=b.x&&mouseX<=b.x+b.w&&mouseY>=b.y&&mouseY<=b.y+b.h;
+    rr(ctx,b.x,b.y,b.w,b.h,12); ctx.fillStyle=hover?shade(COL.panelSolid,-8):COL.panelSolid; ctx.fill();
+    ctx.lineWidth=2.5; ctx.strokeStyle=COL.border; ctx.stroke();
+    setFont(16,true); ctx.fillStyle=COL.text; ctx.textAlign='center'; ctx.fillText(b.label,b.x+b.w/2,b.y+29); ctx.textAlign='left';
+  }
+}
+// 功能按钮组（地图/任务/图鉴/名册/帮助）：原顶部5个橙色按钮，迁至顶部状态栏边框下方、靠右对齐，样式/文字/交互不变
+function drawMenuButtons(){
+  for(const b of menuButtons){
+    const hover=mouseX>=b.x&&mouseX<=b.x+b.w&&mouseY>=b.y&&mouseY<=b.y+b.h;
+    rr(ctx,b.x,b.y,b.w,b.h,10); ctx.fillStyle=hover?shade(COL.accent,-10):COL.accent; ctx.fill();
+    ctx.lineWidth=2; ctx.strokeStyle=COL.border; ctx.stroke();
+    setFont(14,true); ctx.fillStyle='#fff'; ctx.textAlign='center'; ctx.fillText(b.label,b.x+b.w/2,b.y+22); ctx.textAlign='left';
+  }
+}
+
+/* ---------------- 背包（常驻，顶部状态栏边框下方，靠左对齐，展开时向下生长） ---------------- */
+function drawInventory(){
+  const idsAll=invIds();
+  if(idsAll.length===0) return;
+  const sw=38, gap=6, cols=5, pad=10;
+  const expanded=state.invExpanded;
+  const ids=expanded ? idsAll : idsAll.slice(0,5);
+  const extra=!expanded && idsAll.length>5 ? idsAll.length-5 : 0;
+  const rows=Math.ceil(ids.length/cols);
+  const w=cols*sw+(cols-1)*gap+pad*2;
+  const h=rows*sw+(rows-1)*gap+pad*2;
+  const x=10, y=52;   // 紧贴缩小后的顶部状态栏（h=36，底边44）+8px，靠左对齐；展开时向下生长，不压盖地图
+  rr(ctx,x,y,w,h,12); ctx.fillStyle='rgba(255,250,238,0.92)'; ctx.fill();
+  ctx.lineWidth=2; ctx.strokeStyle=COL.border; ctx.stroke();
+  invSlotsRender=[];
+  for(let i=0;i<ids.length;i++){
+    const col=i%cols, row=Math.floor(i/cols);
+    const sx=x+pad+col*(sw+gap), sy=y+pad+row*(sw+gap);
+    rr(ctx,sx,sy,sw,sw,8); ctx.fillStyle='#fff'; ctx.fill();
+    ctx.lineWidth=1.5; ctx.strokeStyle=COL.border; ctx.stroke();
+    drawItemIcon(ids[i], sx+3, sy+3, sw-6);
+    const edible = (ids[i] in EDIBLE);
+    invSlotsRender.push({x:sx,y:sy,w:sw,h:sw,id:ids[i], edible, eat:null});
+    if(expanded && edible){
+      // 右下角"食"小按钮：点击食用恢复体力
+      const eb={x:sx+sw-16, y:sy+sw-16, w:16, h:16};
+      ctx.fillStyle='#E8913C'; rr(ctx,eb.x,eb.y,eb.w,eb.h,4); ctx.fill();
+      setFont(10,true); ctx.fillStyle='#fff'; ctx.textAlign='center';
+      ctx.fillText('食', eb.x+eb.w/2, eb.y+eb.h/2+3); ctx.textAlign='left';
+      invSlotsRender[invSlotsRender.length-1].eat=eb;
+    }
+    if(extra>0 && i===ids.length-1){
+      ctx.fillStyle='rgba(120,90,60,0.85)';
+      rr(ctx,sx+2,sy+2,16,16,5); ctx.fill();
+      setFont(10,true); ctx.fillStyle='#fff'; ctx.textAlign='center';
+      ctx.fillText('+'+extra, sx+10, sy+13);
+      ctx.textAlign='left';
+    }
+  }
+  if(expanded && idsAll.length>1){
+    setFont(11,false); ctx.fillStyle=COL.sub; ctx.textAlign='center';
+    ctx.fillText('点击物品可置顶排序 · 点击【背包】收起', x+w/2, y+h-6);
+    ctx.textAlign='left';
+  }
+}
+
+/* ---------------- 悬浮提示 ---------------- */
+function drawTooltip(){
+  if(hoverInv){
+    const it=ITEMS[hoverInv];
+    const base=it?it.name:hoverInv;
+    const info = (hoverInv in EDIBLE) ? (base+'（食 +'+EDIBLE[hoverInv]+'体力）') : base;
+    setFont(13,true);
+    const w=ctx.measureText(info).width+18;
+    let x=mouseX+14, y=mouseY+14;
+    if(x+w>cw) x=cw-w-4; if(y+28>ch) y=ch-28-4;
+    rr(ctx,x,y,w,26,8); ctx.fillStyle='rgba(60,45,25,0.92)'; ctx.fill();
+    ctx.fillStyle='#fff'; ctx.textAlign='left'; ctx.fillText(info,x+9,y+17);
+  }
+}
+
+/* ---------------- 时间/夜晚色调 ---------------- */
+function drawTimeTint(){
+  const h=state.time;
+  let a=0;
+  if(h<6) a=(6-h)/6*0.35;
+  else if(h>19) a=Math.min(0.4,(h-19)/5*0.4);
+  if(a>0){ ctx.fillStyle='rgba(20,20,60,'+a+')'; ctx.fillRect(0,0,cw,ch); }
+}
+
+/* ---------------- 天气可视化（让天气显示与场景一致） ---------------- */
+let weatherT=0;   // 天气动画累计时间
+function drawWeatherFX(){
+  const w=state.weather;
+  if(w==='晴') return;                       // 晴天无特效
+  // 整体色调叠加（先铺底色，再画粒子）
+  if(w==='大雪'){ ctx.fillStyle='rgba(20,30,50,0.42)'; ctx.fillRect(0,0,cw,ch); }
+  else if(w==='霜冻'){ ctx.fillStyle='rgba(200,225,245,0.16)'; ctx.fillRect(0,0,cw,ch); }
+  else if(w==='多云'){ ctx.fillStyle='rgba(200,200,205,0.12)'; ctx.fillRect(0,0,cw,ch); }
+  else if(w==='小雨'||w==='大雨'||w==='雷阵雨'||w==='台风'){ ctx.fillStyle='rgba(150,175,200,0.14)'; ctx.fillRect(0,0,cw,ch); }
+  else if(w==='小雪'){ ctx.fillStyle='rgba(235,240,248,0.12)'; ctx.fillRect(0,0,cw,ch); }
+
+  const W=cw+60;
+  const wrap=v=>(v%W+W)%W;
+
+  if(w==='多云'){
+    ctx.fillStyle='rgba(245,245,250,0.75)';
+    for(let i=0;i<4;i++){
+      const cx=wrap(i*280 + weatherT*8) - 100;
+      const cy=42+i*26;
+      ctx.beginPath(); ctx.ellipse(cx,cy,48,18,0,0,6.28); ctx.ellipse(cx+40,cy+4,34,14,0,0,6.28); ctx.fill();
+    }
+  } else if(w==='小雨'||w==='大雨'||w==='雷阵雨'||w==='台风'){
+    const heavy=(w==='大雨'||w==='台风'||w==='雷阵雨');
+    const N= heavy?240:140;
+    const sp= heavy?1150:760;
+    const spx=(w==='台风')?520:170;
+    const sl= heavy?18:14;                    // 雨线长度
+    ctx.strokeStyle='rgba(205,222,236,0.55)'; ctx.lineWidth=2;
+    for(let i=0;i<N;i++){
+      const x=wrap(i*137 + weatherT*spx) - 30;
+      const y=wrap(i*89 + weatherT*sp) - 20;
+      const dxn=(w==='台风')? -sl*0.8 : -5;    // 台风雨线斜向
+      ctx.beginPath(); ctx.moveTo(x,y); ctx.lineTo(x+dxn,y+sl); ctx.stroke();
+    }
+    if(w==='台风'){                            // 横向狂风线
+      ctx.strokeStyle='rgba(255,255,255,0.32)'; ctx.lineWidth=2;
+      const N2=40, sp2=820;
+      for(let i=0;i<N2;i++){
+        const x=wrap(i*123 - weatherT*sp2) - 30;
+        const y=(i*71)%ch;
+        ctx.beginPath(); ctx.moveTo(x,y); ctx.lineTo(x+34,y-2); ctx.stroke();
+      }
+    }
+    if(w==='雷阵雨'){                          // 闪电
+      const f=(weatherT*0.13)%1;
+      if(f<0.06){ const a=(0.06-f)/0.06*0.5; ctx.fillStyle='rgba(255,255,255,'+a+')'; ctx.fillRect(0,0,cw,ch); }
+    }
+  } else if(w==='霜冻'){                       // 飘浮冰晶
+    ctx.fillStyle='rgba(220,240,255,0.7)';
+    const N=70, sp=60;
+    for(let i=0;i<N;i++){
+      const x=wrap(i*151 + Math.sin(weatherT*0.5+i)*20) - 15;
+      const y=wrap(i*83 + weatherT*sp) - 15;
+      ctx.beginPath(); ctx.arc(x,y,1.6,0,6.28); ctx.fill();
+    }
+  } else if(w==='小雪'||w==='大雪'){
+    const heavy=(w==='大雪');
+    const N= heavy?180:90;
+    const sp= heavy?150:120;
+    const r= heavy?3:2.2;
+    ctx.fillStyle='rgba(255,255,255,0.9)';
+    for(let i=0;i<N;i++){
+      const x=wrap(i*173 + Math.sin(weatherT*0.6+i)*30 + weatherT*40) - 15;
+      const y=wrap(i*97 + weatherT*sp) - 15;
+      ctx.beginPath(); ctx.arc(x,y,r,0,6.28); ctx.fill();
+    }
+  }
+}
+
+/* ================= 更新 ================= */
+function update(dt){
+  if(state.sleeping){
+    state.sleepTimer-=dt;
+    if(state.sleepTimer<=0) finishSleep();
+    return;
+  }
+  // 移动
+  let dx=0,dy=0;
+  if(keys['arrowleft']||keys['a']) dx-=1;
+  if(keys['arrowright']||keys['d']) dx+=1;
+  if(keys['arrowup']||keys['w']) dy-=1;
+  if(keys['arrowdown']||keys['s']) dy+=1;
+  if(dx!==0||dy!==0){
+    const len=Math.hypot(dx,dy); dx/=len; dy/=len;
+    const sp=170*dt;
+    if(dy<0) state.dir='up'; else if(dy>0) state.dir='down'; else if(dx<0) state.dir='left'; else state.dir='right';
+    const nx=state.px+dx*sp;
+    if(!collides(nx,state.py)) state.px=nx;
+    const ny=state.py+dy*sp;
+    if(!collides(state.px,ny)) state.py=ny;
+  }
+  // 遗迹发现：玩家抵达遗迹点位附近即标记已发现（用于世界地图面板灰色模糊→高亮）
+  if(map && map.relics){
+    const ptx=state.px/TILE, pty=state.py/TILE;
+    for(const r of map.relics){
+      if(!state.relics[r.id] && Math.hypot(ptx-r.tx, pty-r.ty)<=1.6){ state.relics[r.id]=true; }
+    }
+  }
+  // 时间
+  state.time+=dt*TIME_SPEED;
+  if(state.time>=24) state.time-=24;
+  // 天气动画
+  weatherT+=dt;
+  // 动物/NPC巡逻
+  for(const a of map.animals){
+    a.phase+=dt*a.speed;
+    a.tx=a.hx+Math.sin(a.phase)*a.range;
+    a.ty=a.hy+Math.cos(a.phase*0.8)*a.range*0.6;
+  }
+  for(const npc of map.npcs){
+    if(npc.child){
+      // 孩童：被邀请时跟随玩家；否则去当前作息点位（无命中则回默认出生点）
+      const h=state.helpers[npc.id];
+      let tgt;
+      if(h && h.active){ tgt={x:state.px, y:state.py+TILE}; }
+      else { const s=childTargetTile(npc); tgt={x:s.tx*TILE, y:s.ty*TILE}; }
+      const sp=75*dt;
+      let nx=npc.x+clamp(tgt.x-npc.x,-sp,sp);
+      let ny=npc.y+clamp(tgt.y-npc.y,-sp,sp);
+      if(!collides(nx,npc.y)) npc.x=nx;
+      if(!collides(npc.x,ny)) npc.y=ny;
+      if(h){
+        if(h.cd>0) h.cd=Math.max(0,h.cd-dt);
+        if(h.active){
+          h.t-=dt;
+          if(h.t<=0){ h.active=false; h.cd=CHILD_HELP_COOLDOWN; }
+          else {
+            h.gatherCd-=dt;
+            if(h.gatherCd<=0){
+              h.gatherCd=3;   // 每 3 秒采一次，仅拾取地表蘑菇/野花
+              let best=null,bd=1e9;
+              for(const r of map.resources){
+                if(r.depleted) continue;
+                if(r.type!=='mushroom' && r.type!=='flower') continue;
+                const dd=dist(npc.x,npc.y,r.tx*TILE,r.ty*TILE);
+                if(dd<=TILE*1.6 && dd<bd){ bd=dd; best=r; }
+              }
+              if(best){
+                addItem(best.type,1); best.depleted=true; map.occupied.delete(key(best.tx,best.ty));
+                const idx=map.resources.indexOf(best); if(idx>=0) map.resources.splice(idx,1);
+                toast(npcName(npc.id)+'采到了'+ITEMS[best.type].name);
+              }
+            }
+          }
+        }
+      }
+      continue;
+    }
+    npc.phase+=dt*npc.speed;
+    npc.x=npc.hx+Math.sin(npc.phase)*npc.range*TILE;
+    npc.y=npc.hy+Math.cos(npc.phase*0.7)*npc.range*0.5*TILE;
+  }
+  // 场景任务自动完成（如“跨村送信”：走到村外边缘即触发）
+  checkSceneQuests();
+  // 全局结局：集齐全部10位NPC至交+支线后，首次解锁“古农田遗迹真相”拼合入口
+  if(!state.mainStoryUnlocked && allSecretsComplete()){
+    state.mainStoryUnlocked=true; save();
+    toast('你集齐了十位村民的碎片……真相，似乎拼成了。');
+  }
+  // 自动存档（每~5秒）
+  saveTimer-=dt; if(saveTimer<=0){ save(); saveTimer=5; }
+  if(toastT>0) toastT-=dt;
+}
+let saveTimer=5;
+
+/* ================= 主循环 ================= */
+let last=0;
+function loop(ts){
+  const dt=Math.min(0.05,(ts-last)/1000)||0; last=ts;
+  update(dt);
+  updateCamera();
+  ctx.clearRect(0,0,cw,ch);
+  drawWorld();
+  drawTimeTint();
+  drawWeatherFX();
+  drawTopBar();
+  drawInventory();
+  drawBottomBar();
+  drawMenuButtons();
+  if(currentPopup) drawPopup();
+  drawTooltip();
+  // toast
+  if(toastT>0){
+    setFont(15,true);
+    const tw=ctx.measureText(toastMsg).width+28;
+    const x=(cw-tw)/2, y=ch-110;   // 动作栏回到屏幕底部，toast 置于其上方，避免压住动作按钮
+    rr(ctx,x,y,tw,34,10); ctx.fillStyle='rgba(60,45,25,0.9)'; ctx.fill();
+    ctx.fillStyle='#fff'; ctx.textAlign='center'; ctx.fillText(toastMsg,x+tw/2,y+22); ctx.textAlign='left';
+  }
+  requestAnimationFrame(loop);
+}
+
+/* ================= 移动端虚拟控制 ================= */
+function isTouchDevice(){
+  try{ return (window.navigator && window.navigator.maxTouchPoints>0) || ('ontouchstart' in window) || (cw<760); }
+  catch(e){ return cw<760; }
+}
+function initMobileUI(){
+  // 仅浏览器环境且为触摸/小屏设备时创建；无头测试环境（document.createElement 不存在）直接跳过
+  if(typeof document==='undefined' || typeof document.createElement!=='function') return;
+  if(!isTouchDevice()) return;
+  const dpad=document.createElement('div'); dpad.id='dpad';
+  const dirMap={dpUp:['w','arrowup'], dpDown:['s','arrowdown'], dpLeft:['a','arrowleft'], dpRight:['d','arrowright']};
+  const defs=[['dpUp','▲'],['dpLeft','◀'],['dpA','●'],['dpRight','▶'],['dpDown','▼']];
+  for(const id of ['dpUp','dpLeft','dpA','dpRight','dpDown']){
+    const txt=defs.find(d=>d[0]===id)[1];
+    const b=document.createElement('div'); b.id=id; b.className='dbtn'; b.textContent=txt;
+    const dm=dirMap[id];
+    if(dm){
+      const press=(v)=>{ keys[dm[0]]=v; keys[dm[1]]=v; };
+      b.addEventListener('touchstart', e=>{ e.preventDefault(); press(true); }, {passive:false});
+      b.addEventListener('touchend',   e=>{ e.preventDefault(); press(false); });
+      b.addEventListener('touchcancel',e=>{ press(false); });
+    } else {
+      b.addEventListener('touchstart', e=>{ e.preventDefault(); tryInteractNPC(); }, {passive:false});
+    }
+    dpad.appendChild(b);
+  }
+  document.body.appendChild(dpad);
+  dpad.style.display='block';
+}
+
+/* ================= 启动 ================= */
+function init(){
+  resize();
+  if(!load()){
+    state=defaultState();
+    map=buildMap();
+    initWeather();
+  }
+  buildMenuButtons();
+  buildBottomButtons();
+  initMobileUI();
+  requestAnimationFrame(loop);
+}
+window.addEventListener('resize', ()=>{ buildMenuButtons(); buildBottomButtons(); });
+init();
+</script>
+</body>
+</html>
